@@ -4,7 +4,11 @@ Vocabulary for turbo-12f. The CLI is the authority on what it
 enforces; this file states what it does *not* claim.
 
 - **Run**: one task, one run record (`runs/<id>.json`), one worktree,
-  one append-only event log (`runs/<id>.events.jsonl`).
+  one append-only event log (`runs/<id>.events.jsonl`). Every command
+  that changes a run holds `runs/<id>.lock` for its duration; a
+  concurrent command on the same run is refused as busy. Different
+  runs share nothing but the product repo's `.git` and run in
+  parallel.
 - **Evidence**: a stored artifact with path, SHA-256, revision,
   provenance. All evidence lives under the state home, never inside
   the product repo.
