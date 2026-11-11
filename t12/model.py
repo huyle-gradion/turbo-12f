@@ -248,13 +248,34 @@ def paths_overlap(a, b):
     return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
 
 
+def under(path, roots):
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
 def outside_touches(run, paths):
     """The paths a run may not change under its declared touches."""
     touches = run.get("touches")
     if touches is None:
         return []
-    return [p for p in paths
-            if not any(p == t or p.startswith(t + os.sep) for t in touches)]
+    return [p for p in paths if not under(p, touches)]
+
+
+POLICY_PATH = ".t12/policy.json"
+
+
+def security_paths(policy_text):
+    """Paths whose change requires a security review, from the policy
+    file as it stands on the base commit. The policy file itself is
+    always one of them, so a candidate cannot quietly drop an entry."""
+    if policy_text is None:
+        return []
+    try:
+        paths = json.loads(policy_text).get("security_review_paths", [])
+    except (ValueError, AttributeError) as exc:
+        raise StateError(f"{POLICY_PATH} on the base commit is not a JSON object") from exc
+    if not isinstance(paths, list) or not all(_is_worktree_path(p) for p in paths):
+        raise StateError(f"{POLICY_PATH}: security_review_paths must be relative paths: {paths!r}")
+    return [os.path.normpath(p) for p in paths] + [os.path.dirname(POLICY_PATH)]
 
 
 def _is_worktree_path(path):

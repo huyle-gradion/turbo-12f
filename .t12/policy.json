@@ -1,0 +1,9 @@
+{
+  "security_review_paths": [
+    "t12/model.py",
+    "t12/sandbox.py",
+    "t12/evidence.py",
+    "t12/store.py",
+    "prompts"
+  ]
+}

@@ -199,6 +199,24 @@ prompt, not a check. Like `calibrate`, `retro` only proposes. Turn a
 proposal into a task file and run it through the factory; a human
 merges.
 
+## Letting the factory work on itself
+
+turbo-12f is a repo like any other, so a `retro` proposal can become
+a task aimed at turbo-12f. Two rules keep that safe:
+
+- **The candidate never checks itself.** Run the factory from an
+  installed copy of `main` (or the `turbo-12f` image through
+  `bin/t12-container`), never from a worktree. `t12` refuses to run
+  when its own code sits inside the state home it is given.
+- **Policy changes need a security review.** A product repo may list
+  paths in `.t12/policy.json` as `"security_review_paths"`. `stage`
+  reads that file from the run's base commit, not the candidate, and
+  adds `security` to `required_reviews` when the candidate changes a
+  listed path or the policy file itself. turbo-12f lists its state
+  machine, sandbox, evidence and storage code, and its prompts.
+
+The factory still stops at `local-verified`. A human merges.
+
 ## Running in a container
 
 `bin/t12-container` takes the same arguments as `bin/t12` and runs

@@ -1182,6 +1182,49 @@ class CliCase(unittest.TestCase):
         self.assertIn("Verification miss", text)
         self.assertIn("changes nothing", text)
 
+    def test_a_factory_inside_the_state_home_refuses_to_run(self):
+        copy = os.path.join(self.home, "worktrees", "demo-1")
+        shutil.copytree(os.path.join(ROOT, "t12"), os.path.join(copy, "t12"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(os.path.join(ROOT, "bin"), os.path.join(copy, "bin"))
+        result = subprocess.run(
+            [os.path.join(copy, "bin", "t12"), "status", "--home", self.home, "--task-id", "demo-1"],
+            capture_output=True, text=True, timeout=60, cwd=self.tmp.name)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("runs from inside the state home", result.stderr)
+
+    def test_policy_paths_on_the_base_require_a_security_review(self):
+        os.makedirs(os.path.join(self.repo, ".t12"))
+        with open(os.path.join(self.repo, ".t12", "policy.json"), "w") as fh:
+            json.dump({"security_review_paths": ["app.py"]}, fh)
+        self._git(self.repo, "add", ".")
+        self._git(self.repo, "commit", "-qm", "policy")
+        home, task = self.prepare_custom("demo-policy")
+        self.t12("prepare", "--home", home, "--task", task)
+        wt = os.path.join(home, "worktrees", "demo-policy")
+        with open(os.path.join(wt, ".t12", "policy.json"), "w") as fh:
+            json.dump({"security_review_paths": []}, fh)
+        self._git(wt, "commit", "-qam", "chore: try to drop the policy")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-policy",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        self.t12("stage", "--home", home, "--task-id", "demo-policy", "--session", "sess-builder")
+        self.assertEqual(self.run_record(home, "demo-policy")["required_reviews"],
+                         ["reviewer", "security"])
+        self.t12("gate", "--home", home, "--task-id", "demo-policy", "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", home, "--task-id", "demo-policy")
+        self.do_review(home=home, task_id="demo-policy")
+        result = self.t12("green", "--home", home, "--task-id", "demo-policy", expect=1)
+        self.assertIn("security review", result.stderr)
+        self.do_review(home=home, task_id="demo-policy", role="security", session="sess-security")
+        self.t12("green", "--home", home, "--task-id", "demo-policy")
+
     def board(self):
         rows = json.loads(self.t12("board", "--home", self.home, "--json").stdout)
         return {row["task_id"]: row for row in rows}

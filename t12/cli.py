@@ -449,11 +449,17 @@ def cmd_stage(args):
         raise StateError("refusing stage: candidate does not descend from the red commit")
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
+    sensitive = []
     if run.get("base_commit"):
-        outside = model.outside_touches(run, gitio.changed_paths(wt, run["base_commit"], candidate))
+        changed = gitio.changed_paths(wt, run["base_commit"], candidate)
+        outside = model.outside_touches(run, changed)
         if outside:
             raise StateError("refusing stage: the candidate changes paths outside the "
                              f"task's touches: {', '.join(outside)}")
+        roots = model.security_paths(gitio.file_at(wt, run["base_commit"], model.POLICY_PATH))
+        sensitive = [p for p in changed if model.under(p, roots)]
+        if sensitive and "security" not in run["required_reviews"]:
+            run["required_reviews"].append("security")
     if run["phase"] in ("gates", "green"):
         gate_mod.reset_for_new_candidate(run)
         run["replay"] = None
@@ -462,7 +468,7 @@ def cmd_stage(args):
     model.bump_op(run)
     model.bind_session(run, "builder", args.session)
     model.transition(run, "gates")
-    _save(home, run, "staged", {"commit": candidate})
+    _save(home, run, "staged", {"commit": candidate, "security_paths": sensitive})
     print(f"staged: candidate={candidate[:12]}")
     return 0
 
@@ -1201,6 +1207,12 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
+        if getattr(args, "home", None):
+            home = os.path.realpath(args.home)
+            if os.path.commonpath([os.path.realpath(PROJECT_ROOT), home]) == home:
+                raise StateError(
+                    f"refusing: this t12 ({PROJECT_ROOT}) runs from inside the state home; "
+                    "a candidate never certifies itself, run the installed factory instead")
         if getattr(args, "task_id", None) is None or args.func in (cmd_status, cmd_context):
             return args.func(args)
         with model.run_lock(_home(args), args.task_id):
