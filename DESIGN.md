@@ -49,6 +49,52 @@ here talks to GitHub or Asana yet. Python standard library only.
 - The worker is one narrow job, not "the factory". The factory is
   the deterministic shell around it.
 
+## The bottleneck this version is designed against
+
+Your diagnosis from Turbo (2026-11-07), stated again for this
+rebuild: delivery already takes mostly a day and still cannot ship
+even two issues, and the bottleneck is testing and CI — the time
+spent testing, retesting, checking, and verifying. Three mechanisms
+make it worse, and this version is built to break all three:
+
+1. **TDD cost per issue.** Every issue pays red/green iterations,
+   targeted tests, a full suite on the final candidate, a post-merge
+   suite, and CI. On Turbo the post-merge suite alone reached 426
+   tests with a ~1,197s (~20 min) wall on main @ d201c7b — and that
+   was the backstop, not the per-iteration cost. Re-running the full
+   suite on every iteration is what made each issue take a day.
+   Countermeasure here: test-only-what-changed is encoded in the
+   gates. Gates are explicit per-task commands; the full suite runs
+   only if the task declares it as a gate. `green` certifies only
+   the recorded evidence, never a fresh full run.
+2. **Tests with no value.** A test written by the agent that
+   implements the code proves nothing: it is written to pass with
+   the code, so green is the same claim twice — the test and the
+   code agree with each other, and neither is checked against the
+   acceptance criteria. Countermeasure here: the test-writer and
+   the implementer are different sessions; the implementer must not
+   write or edit tests (`prompts/test-writer.md`,
+   `prompts/builder.md`, `skills/orchestrator/SKILL.md`). And a test
+   only counts if the red evidence shows it failing before the
+   implementation and the replay shows it passing after — same
+   command, same test blob, both recorded.
+3. **Useless tests accumulate.** Every issue adds tests and almost
+   none are ever removed: 283 tests after issues #20–#22, 409 at
+   the consolidation baseline, 426 by d201c7b. Each new test slows
+   every future run, so delivery gets worse the more you ship —
+   consolidation issue #91 needed 18+ net removals just to get back
+   under 409. Countermeasure here: consolidation is a standing rule
+   in the test-writer prompt (combine close cases into one, remove
+   unnecessary ones, simplify), and the reviewer treats a test that
+   merely restates the implementation as a Verification miss
+   (`skills/reviewer/SKILL.md`).
+
+**Still open, not yet built:** there is no hard test budget. Nothing
+caps new tests per task or suite time per run. The next decision is
+whether to add one to the task file (e.g. `max_new_tests`, or a
+suite-time ceiling enforced as a gate) or to rely on the reviewer +
+consolidation rule above.
+
 ## The 12 factors — how each one is implemented here
 
 | # | Factor | Implementation in turbo-12f |

@@ -28,6 +28,11 @@ route fixes to Builder (code) or QA (tests).
      Should fix at most; **never blocks alone**.
    Severity: Blocker / Should fix / Nit / Human gate. A Spec-axis
    finding that contradicts an AC is a Blocker, not a nit.
+   **Test-value check:** a test that only passes with the code by
+   construction — written by the implementer, or asserting the
+   implementation's own output rather than the AC — is a
+   Verification miss. A test only counts if the red evidence shows
+   it failing before the implementation.
 4. **Verify evidence yourself.** Re-run the exact recorded test
    command in the worktree. Green continues; red bounces to QA with
    the failure quoted. For background/upload flows, verify terminal
