@@ -151,6 +151,31 @@ state home if `t12 calibrate --apply` has written one, else the
 built-ins (3600s / 100 ops / 3 repairs). The run records which
 source applied (`budget_source`).
 
+## Running several tasks at once
+
+Separate runs share one state home and proceed in parallel. Each
+command that changes a run holds that run's lock, so a second command
+on the same run fails with `busy` instead of corrupting its log.
+`t12 board` shows every run and who acts next.
+
+Two optional task fields keep parallel runs from colliding at merge:
+
+- `"touches": ["src/auth", "tests/auth"]` lists the paths the task
+  may change. `stage` refuses a candidate that changes anything else
+  since the base commit, including the test the test-writer added.
+  A task without `touches` may change anything.
+- `"depends_on": ["task-a"]` names tasks that must be merged first.
+
+`bin/t12-queue --home <state> --queue <dir> --max N` makes one pass
+over a directory of task files in file-name order. It prepares each
+task whose dependencies are local-verified and merged into their
+base, whose `touches` overlap no unmerged run, and that fits under N
+active runs. Every other task stays queued with its reason. A task
+without `touches` overlaps everything, so it runs alone. Start one
+orchestrator per `started` line and run the pass again whenever a
+run finishes or a merge lands; a task that already has a run is never
+prepared twice.
+
 ## Running in a container
 
 `bin/t12-container` takes the same arguments as `bin/t12` and runs

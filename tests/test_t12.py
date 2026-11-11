@@ -997,6 +997,103 @@ class CliCase(unittest.TestCase):
         self.assertEqual(self.event_types().count("worker-output-rejected"), len(rejected))
         self.assertEqual(self.run_record()["budgets"]["ops_used"], len(rejected))
 
+    def drive_to_verified(self, home, task_id, app=APP_V2):
+        wt = os.path.join(home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", task_id,
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(app)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        self.t12("stage", "--home", home, "--task-id", task_id, "--session", "sess-builder")
+        self.t12("gate", "--home", home, "--task-id", task_id, "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", home, "--task-id", task_id)
+        self.do_review(home=home, task_id=task_id)
+        self.t12("green", "--home", home, "--task-id", task_id)
+        return self.run_record(home, task_id)["candidate"]["commit"]
+
+    def test_stage_refuses_changes_outside_touches(self):
+        home, task = self.prepare_custom("demo-narrow", touches=["tests"])
+        self.t12("prepare", "--home", home, "--task", task)
+        wt = os.path.join(home, "worktrees", "demo-narrow")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-narrow",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        result = self.t12("stage", "--home", home, "--task-id", "demo-narrow",
+                          "--session", "sess-builder", expect=1)
+        self.assertIn("outside the task's touches: app.py", result.stderr)
+
+        home, task = self.prepare_custom("demo-wide", touches=["app.py", "tests"])
+        self.t12("prepare", "--home", home, "--task", task)
+        self.drive_to_verified(home, "demo-wide")
+
+    def test_touches_and_depends_on_are_checked_at_admission(self):
+        for field, bad, message in (("touches", ["../x"], "touches"),
+                                    ("touches", "app.py", "touches"),
+                                    ("depends_on", ["no spaces"], "depends_on")):
+            home, task = self.prepare_custom("demo-bad", **{field: bad})
+            result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+            self.assertIn(message, result.stderr)
+            shutil.rmtree(home)
+
+    def queue(self, home, queue_dir, max_runs):
+        result = subprocess.run(
+            [os.path.join(ROOT, "bin", "t12-queue"), "--home", home, "--queue", queue_dir,
+             "--max", str(max_runs)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = {}
+        for line in result.stdout.splitlines():
+            verdict, rest = line.split(" ", 1)
+            task_id, _, why = rest.partition(": ")
+            lines[task_id] = (verdict, why)
+        return lines
+
+    def test_queue_starts_only_tasks_that_cannot_collide(self):
+        home = os.path.join(self.tmp.name, "home-queue")
+        self.t12("init", "--home", home, "--repo", self.repo)
+        queue_dir = os.path.join(self.tmp.name, "queue")
+        os.makedirs(queue_dir)
+        for name, fields in (("a", {"touches": ["app.py", "tests"]}),
+                             ("b", {"touches": ["app.py"]}),
+                             ("c", {"touches": ["docs"]}),
+                             ("d", {"touches": ["lib"], "depends_on": ["q-a"]})):
+            task = task_dict(task_id=f"q-{name}")
+            task.update(fields)
+            with open(os.path.join(queue_dir, f"{name}.json"), "w") as fh:
+                json.dump(task, fh)
+
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-a": ("started", ""),
+            "q-b": ("waiting", "touches overlap q-a"),
+            "q-c": ("started", ""),
+            "q-d": ("waiting", "depends on q-a, not merged yet"),
+        })
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-b": ("waiting", "touches overlap q-a"),
+            "q-d": ("waiting", "depends on q-a, not merged yet"),
+        })
+
+        candidate = self.drive_to_verified(home, "q-a")
+        self.assertEqual(self.queue(home, queue_dir, 2)["q-b"],
+                         ("waiting", "touches overlap q-a"))
+        self._git(self.repo, "merge", "--ff-only", candidate)
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-b": ("started", ""),
+            "q-d": ("waiting", "at capacity (2 active)"),
+        })
+        self.t12("stop", "--home", home, "--task-id", "q-c", "--reason", "done elsewhere")
+        self.assertEqual(self.queue(home, queue_dir, 2), {"q-d": ("started", "")})
+        self.assertEqual(self.run_record(home, "q-d")["base_commit"], candidate)
+
     def board(self):
         rows = json.loads(self.t12("board", "--home", self.home, "--json").stdout)
         return {row["task_id"]: row for row in rows}

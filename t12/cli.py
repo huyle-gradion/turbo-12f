@@ -257,7 +257,7 @@ def _admit(home, repo, task, task_id, supersede):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
-    gitio.rev_parse(repo, base)
+    base_commit = gitio.rev_parse(repo, base)
     for gate in task.get("gates", []):
         try:
             sandbox.check_command(gate.get("command") or [])
@@ -285,13 +285,13 @@ def _admit(home, repo, task, task_id, supersede):
             gitio.delete_branch(repo, old["branch"])
     calibrated = limits.load_limits(home)
     adapter, image = sandbox.resolve_adapter(task)
-    run = model.new_run(task, repo, home, supersedes=supersedes,
+    run = model.new_run(task, repo, home, base_commit, supersedes=supersedes,
                         defaults=calibrated,
                         defaults_source="calibrated" if calibrated else "builtin",
                         sandbox_adapter=adapter, sandbox_image=image)
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
-    gitio.add_worktree(repo, run["worktree"], run["branch"], base)
+    gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
     model.transition(run, "ready")
     _save(home, run, "prepared", {"branch": run["branch"], "base": base,
                                   "supersedes": supersedes})
@@ -346,6 +346,7 @@ def cmd_context(args):
         "branch": run["branch"],
         "worktree": wt,
         "base": run["base"],
+        "touches": run.get("touches"),
         "budgets": {
             "time_left_s": int(model.time_left_s(run)),
             "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
@@ -446,6 +447,11 @@ def cmd_stage(args):
         raise StateError("refusing stage: candidate does not descend from the red commit")
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
+    if run.get("base_commit"):
+        outside = model.outside_touches(run, gitio.changed_paths(wt, run["base_commit"], candidate))
+        if outside:
+            raise StateError("refusing stage: the candidate changes paths outside the "
+                             f"task's touches: {', '.join(outside)}")
     if run["phase"] in ("gates", "green"):
         gate_mod.reset_for_new_candidate(run)
         run["replay"] = None

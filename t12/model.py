@@ -244,6 +244,19 @@ def record_measurements(run):
     return run["measurements"]
 
 
+def paths_overlap(a, b):
+    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
+def outside_touches(run, paths):
+    """The paths a run may not change under its declared touches."""
+    touches = run.get("touches")
+    if touches is None:
+        return []
+    return [p for p in paths
+            if not any(p == t or p.startswith(t + os.sep) for t in touches)]
+
+
 def _is_worktree_path(path):
     if not isinstance(path, str) or not path or os.path.isabs(path):
         return False
@@ -258,7 +271,7 @@ def open_escalation(run):
     return None
 
 
-def new_run(task, repo, home, supersedes=None, defaults=None,
+def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
     defaults = defaults or limits_mod.BUILTIN_DEFAULTS
@@ -296,8 +309,20 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
     normalized = [os.path.normpath(d) for d in verify_deps]
     for i, a in enumerate(normalized):
         for b in normalized[i + 1:]:
-            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+            if paths_overlap(a, b):
                 raise StateError(f"verify_deps entries overlap: {a!r} and {b!r}")
+    touches = task.get("touches")
+    if touches is not None:
+        if not isinstance(touches, list) or not touches or not all(
+                _is_worktree_path(t) for t in touches):
+            raise StateError(
+                f"touches must be a non-empty list of relative paths inside the worktree: {touches!r}"
+            )
+        touches = sorted({os.path.normpath(t) for t in touches})
+    depends_on = task.get("depends_on", [])
+    if not isinstance(depends_on, list) or not all(
+            isinstance(d, str) and TASK_ID_RE.match(d) for d in depends_on):
+        raise StateError(f"depends_on must be a list of task ids: {depends_on!r}")
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -305,6 +330,9 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "acceptance_criteria": list(task["acceptance_criteria"]),
         "repo": repo,
         "base": task.get("base", "main"),
+        "base_commit": base_commit,
+        "touches": touches,
+        "depends_on": list(depends_on),
         "branch": task.get("branch") or f"task/{task['id']}",
         "worktree": os.path.join(home, "worktrees", task["id"]),
         "phase": "unadmitted",
