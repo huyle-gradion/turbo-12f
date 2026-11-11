@@ -204,6 +204,11 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         raise StateError(
             f"verify_deps must be a list of relative paths inside the worktree: {verify_deps!r}"
         )
+    normalized = [os.path.normpath(d) for d in verify_deps]
+    for i, a in enumerate(normalized):
+        for b in normalized[i + 1:]:
+            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                raise StateError(f"verify_deps entries overlap: {a!r} and {b!r}")
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -240,7 +245,7 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),
-        "verify_deps": [os.path.normpath(d) for d in verify_deps],
+        "verify_deps": normalized,
         "escalations": [],
         "deliveries": [],
         "github_repo": task.get("github_repo"),

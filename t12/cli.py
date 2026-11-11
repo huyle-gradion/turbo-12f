@@ -107,8 +107,8 @@ def _link_deps(run, wt, checkout):
             raise StateError(f"declared dependency {dep} is tracked in the commit; "
                              "verify_deps must name untracked paths")
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        os.symlink(source, target)
         real.append(os.path.realpath(source))
+        os.symlink(real[-1], target)
     return real
 
 
@@ -393,6 +393,7 @@ def cmd_red(args):
         raise StateError("--command must not be empty")
     commit = gitio.commit_with_path(wt, test_path, f"test({run['task_id']}): red test")
     obs = _run_on_commit(home, run, wt, commit, command)
+    model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] == 0:
         _save(home, run, "red-failed", {
             "step": "red", "exit_code": obs["exit_code"],
@@ -418,10 +419,9 @@ def cmd_red(args):
         "marker": args.marker,
         "exit_code": obs["exit_code"],
         "output": ref,
-        "test_blob": gitio.blob_hash(wt, test_path),
+        "test_blob": gitio.blob_at(wt, commit, test_path),
         "commit": commit,
     }
-    model.bump_op(run)
     model.bind_session(run, "test-writer", args.session)
     model.transition(run, "red")
     _save(home, run, "red", {"commit": commit, "test_path": test_path})
@@ -855,12 +855,13 @@ def cmd_resume(args):
     if run["phase"] != "paused":
         raise StateError(f"resume requires phase 'paused', run is {run['phase']!r}")
     pending = model.open_escalation(run)
-    if pending and not args.answer:
+    answer = (args.answer or "").strip()
+    if pending and not answer:
         raise StateError(
             f"run is waiting on a human answer to: {pending['question']!r}; "
             "resume with --answer"
         )
-    if args.answer and not pending:
+    if answer and not pending:
         raise StateError("no open question to answer; resume without --answer")
     prior = run["prior_phase"]
     wt = _check_worktree(run)
@@ -893,9 +894,9 @@ def cmd_resume(args):
         evidence.verify_ref(home, run["task_id"], ref)
     _verify_chain_or_raise(home, run)
     if pending:
-        pending["answer"] = args.answer
+        pending["answer"] = answer
         pending["answered_at"] = time.time()
-        _save(home, run, "human-response", {"question": pending["question"], "answer": args.answer})
+        _save(home, run, "human-response", {"question": pending["question"], "answer": answer})
     model.transition(run, prior)
     run["prior_phase"] = None
     _save(home, run, "resumed", {"phase": prior})
@@ -990,8 +991,9 @@ def cmd_act(args):
     output is a failed step that costs an operation, never a guess."""
     home = _home(args)
     run = _run(home, args.task_id)
-    if run["phase"] in ("local-verified", "stopped"):
-        raise StateError(f"run is {run['phase']}; no further worker output is accepted")
+    if run["phase"] in ("local-verified", "stopped", "paused"):
+        raise StateError(f"run is {run['phase']}; no worker output is accepted")
+    model.check_budgets(run)
     with open(args.input, "rb") as fh:
         data = fh.read()
     seq = len(model.read_events(home, run["task_id"])) + 1
@@ -1004,6 +1006,8 @@ def cmd_act(args):
         _save(home, run, "worker-output-rejected",
               {"role": args.role, "output": ref, "error": str(exc)})
         raise
+    if tool == "qa_report":
+        model.bind_session(run, "qa", args.session)
     _save(home, run, "worker-output", {"role": args.role, "tool": tool, "output": ref})
     step = dict(home=args.home, task_id=args.task_id, session=args.session)
     if tool == "red_test_ready":

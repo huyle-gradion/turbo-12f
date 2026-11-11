@@ -55,7 +55,7 @@ def is_clean(repo):
 
 
 def dirty_paths(repo):
-    out = git_ok(repo, "status", "--porcelain")
+    out = git_ok(repo, "status", "--porcelain", "--untracked-files=all")
     paths = []
     for line in out.splitlines():
         if len(line) > 3:
@@ -121,6 +121,10 @@ def commit_with_path(repo, rel_path, message):
     finally:
         if os.path.exists(index):
             os.remove(index)
+
+
+def blob_at(repo, commit, rel_path):
+    return git_ok(repo, "rev-parse", f"{commit}:{rel_path}")
 
 
 def move_branch_to(repo, commit):
