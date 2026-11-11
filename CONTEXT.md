@@ -34,4 +34,11 @@ enforces; this file states what it does *not* claim.
 - A same-user process can forge local files. This is a honesty and
   reproducibility layer, not a security boundary against a malicious
   local actor.
+- Candidate binding holds against accidents (uncommitted, ignored,
+  or later-written files in the builder's worktree), not against a
+  builder that tampers on purpose. The builder runs unsandboxed as
+  the operator, so it can plant a hook, `git replace` ref, or smudge
+  filter in the shared `.git`, or a `.pth` file in the verify home,
+  and make a gate pass on a broken candidate. Closing that needs the
+  builder itself caged away from `.git` and the state home.
 - No network, no credentials, no model calls in the core or tests.
