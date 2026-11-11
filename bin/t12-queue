@@ -37,6 +37,14 @@ def is_merged(repo, run):
     return result.returncode == 0
 
 
+def normalized(touches):
+    """A task's touches as the core stores them, or None for anything
+    that is not a list of strings (prepare refuses those anyway)."""
+    if not isinstance(touches, list) or not all(isinstance(t, str) for t in touches):
+        return None
+    return [os.path.normpath(t) for t in touches]
+
+
 def overlaps(a, b):
     if a is None or b is None:
         return True
@@ -69,8 +77,9 @@ def admit(home, queue_dir, max_active):
         task_id = task.get("id")
         if task_id in runs:
             continue
+        touches = normalized(task.get("touches"))
         unmet = [d for d in task.get("depends_on", []) if d not in merged]
-        clash = [tid for tid, touches in claims.items() if overlaps(task.get("touches"), touches)]
+        clash = [tid for tid, claimed in claims.items() if overlaps(touches, claimed)]
         if unmet:
             print(f"waiting {task_id}: depends on {', '.join(unmet)}, not merged yet")
         elif clash:
@@ -84,7 +93,7 @@ def admit(home, queue_dir, max_active):
                 print(f"failed {task_id}: {result.stderr.strip()}")
                 continue
             print(f"started {task_id}")
-            claims[task_id] = task.get("touches")
+            claims[task_id] = touches
             active += 1
 
 

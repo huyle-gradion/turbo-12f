@@ -381,6 +381,8 @@ def cmd_red(args):
     test_path = args.test_path
     if not os.path.exists(os.path.join(wt, test_path)):
         raise StateError(f"test file not found in worktree: {test_path}")
+    if model.outside_touches(run, [os.path.normpath(test_path)]):
+        raise StateError(f"refusing red: the test is outside the task's touches: {test_path}")
     dirty = set(gitio.dirty_paths(wt))
     if dirty - {test_path}:
         raise StateError(f"refusing red: unrelated dirty files: {sorted(dirty - {test_path})}")

@@ -1015,6 +1015,17 @@ class CliCase(unittest.TestCase):
         self.t12("green", "--home", home, "--task-id", task_id)
         return self.run_record(home, task_id)["candidate"]["commit"]
 
+    def test_red_refuses_a_test_outside_touches(self):
+        home, task = self.prepare_custom("demo-red-narrow", touches=["app.py"])
+        self.t12("prepare", "--home", home, "--task", task)
+        with open(os.path.join(home, "worktrees", "demo-red-narrow", "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        result = self.t12("red", "--home", home, "--task-id", "demo-red-narrow",
+                          "--test-path", "tests/test_greet.py",
+                          "--command", "python3 -m unittest tests.test_greet -q",
+                          "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+        self.assertIn("outside the task's touches: tests/test_greet.py", result.stderr)
+
     def test_stage_refuses_changes_outside_touches(self):
         home, task = self.prepare_custom("demo-narrow", touches=["tests"])
         self.t12("prepare", "--home", home, "--task", task)
@@ -1065,7 +1076,8 @@ class CliCase(unittest.TestCase):
         for name, fields in (("a", {"touches": ["app.py", "tests"]}),
                              ("b", {"touches": ["app.py"]}),
                              ("c", {"touches": ["docs"]}),
-                             ("d", {"touches": ["lib"], "depends_on": ["q-a"]})):
+                             ("d", {"touches": ["lib"], "depends_on": ["q-a"]}),
+                             ("e", {"touches": ["./app.py"]})):
             task = task_dict(task_id=f"q-{name}")
             task.update(fields)
             with open(os.path.join(queue_dir, f"{name}.json"), "w") as fh:
@@ -1076,10 +1088,12 @@ class CliCase(unittest.TestCase):
             "q-b": ("waiting", "touches overlap q-a"),
             "q-c": ("started", ""),
             "q-d": ("waiting", "depends on q-a, not merged yet"),
+            "q-e": ("waiting", "touches overlap q-a"),
         })
         self.assertEqual(self.queue(home, queue_dir, 2), {
             "q-b": ("waiting", "touches overlap q-a"),
             "q-d": ("waiting", "depends on q-a, not merged yet"),
+            "q-e": ("waiting", "touches overlap q-a"),
         })
 
         candidate = self.drive_to_verified(home, "q-a")
@@ -1089,9 +1103,13 @@ class CliCase(unittest.TestCase):
         self.assertEqual(self.queue(home, queue_dir, 2), {
             "q-b": ("started", ""),
             "q-d": ("waiting", "at capacity (2 active)"),
+            "q-e": ("waiting", "touches overlap q-b"),
         })
         self.t12("stop", "--home", home, "--task-id", "q-c", "--reason", "done elsewhere")
-        self.assertEqual(self.queue(home, queue_dir, 2), {"q-d": ("started", "")})
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-d": ("started", ""),
+            "q-e": ("waiting", "touches overlap q-b"),
+        })
         self.assertEqual(self.run_record(home, "q-d")["base_commit"], candidate)
 
     def board(self):

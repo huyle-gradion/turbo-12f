@@ -176,6 +176,16 @@ orchestrator per `started` line and run the pass again whenever a
 run finishes or a merge lands; a task that already has a run is never
 prepared twice.
 
+The queue counts a run as merged when its candidate commit is in the
+base branch's history, as after a merge commit or a fast-forward. A
+squash or rebase merge creates new commits, so the queue never sees
+that run as merged: tasks that depend on it, or overlap it, wait. Use
+merge commits for factory branches.
+
+Runs prepared before `touches` existed carry no `base_commit`, so
+`stage` skips the `touches` and policy checks for them. Finish or
+supersede them before relying on either.
+
 ## Running in a container
 
 `bin/t12-container` takes the same arguments as `bin/t12` and runs
