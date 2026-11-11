@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-T12="$ROOT/bin/t12"
+T12="$(realpath -- "${T12:-$ROOT/bin/t12}")"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

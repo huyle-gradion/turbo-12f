@@ -150,11 +150,43 @@ state home if `t12 calibrate --apply` has written one, else the
 built-ins (3600s / 100 ops / 3 repairs). The run records which
 source applied (`budget_source`).
 
+## Running in a container
+
+`bin/t12-container` takes the same arguments as `bin/t12` and runs
+the whole factory inside `docker run`:
+
+```sh
+bin/t12-container init --repo /path/to/product --home /path/to/state-home
+bin/t12-container prepare --home /path/to/state-home --task examples/task.json
+```
+
+The container runs as your uid and gid with no network, a read-only
+root filesystem, and no capabilities. It can see only these paths:
+
+- this checkout, read-only
+- the current directory
+- every path argument (a file argument mounts its parent directory)
+- the product repo recorded in the state home
+
+Each path is mounted at its host location, so a state home works
+from the host and from the container in either order. Your
+`git config user.name` and `user.email` are passed in as
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*`. Nothing else from your
+environment goes in.
+
+The image comes from `T12_IMAGE` (default `python:3.12`). It must
+contain `python3`, `git`, and every tool your gate commands call,
+and it must already be present locally. The launcher does not pull
+it. Verification inside the container uses Landlock, as it does on
+the host. The `docker` sandbox adapter is not available inside the
+container.
+
 ## Tests
 
 ```sh
 python3 -m unittest discover -s tests -v
 bash scripts/smoke.sh
+T12=bin/t12-container bash scripts/smoke.sh   # the same smoke, in a container
 ```
 
 Both run against disposable repos only.

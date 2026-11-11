@@ -1,0 +1,73 @@
+#!/bin/bash
+# turbo-12f in a container: same CLI, same arguments as bin/t12.
+# Paths are mounted at their host locations because run records and
+# git worktree links store absolute paths; a state home stays usable
+# from the host and from the container.
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+IMAGE="${T12_IMAGE:-python:3.12}"
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "t12-container: image $IMAGE is not present locally (pull or build it first; no implicit pulls)" >&2
+  exit 1
+fi
+
+mounts=("$ROOT")
+add_mount() {
+  local path
+  path="$(CDPATH= cd -- "$1" && pwd -P)" || return 0
+  for m in "${mounts[@]}"; do
+    [ "$m" = "$path" ] && return 0
+  done
+  mounts+=("$path")
+}
+
+home=""
+prev=""
+for arg in "$@"; do
+  value="$arg"
+  case "$arg" in
+    --*=*) value="${arg#*=}"; prev="${arg%%=*}" ;;
+  esac
+  if [ "$prev" = "--home" ]; then
+    mkdir -p -- "$value"
+    home="$value"
+  fi
+  if [ -d "$value" ]; then
+    add_mount "$value"
+  elif [ -e "$value" ]; then
+    add_mount "$(dirname -- "$value")"
+  fi
+  prev="$arg"
+done
+add_mount "$PWD"
+
+if [ -n "$home" ] && [ -f "$home/config.json" ]; then
+  repo="$(sed -n 's/.*"repo": *"\([^"]*\)".*/\1/p' "$home/config.json")"
+  [ -n "$repo" ] && add_mount "$repo"
+fi
+
+docker_args=(
+  run --rm
+  --network none
+  --read-only --tmpfs /tmp
+  --cap-drop ALL --security-opt no-new-privileges
+  --user "$(id -u):$(id -g)"
+  -e HOME=/tmp
+  -e PYTHONDONTWRITEBYTECODE=1
+  -v "$ROOT:$ROOT:ro"
+  -w "$(pwd -P)"
+)
+for m in "${mounts[@]:1}"; do
+  docker_args+=(-v "$m:$m")
+done
+for key in name email; do
+  value="$(git config "user.$key" 2>/dev/null || true)"
+  if [ -n "$value" ]; then
+    upper="$(echo "$key" | tr a-z A-Z)"
+    docker_args+=(-e "GIT_AUTHOR_$upper=$value" -e "GIT_COMMITTER_$upper=$value")
+  fi
+done
+
+exec docker "${docker_args[@]}" "$IMAGE" "$ROOT/bin/t12" "$@"

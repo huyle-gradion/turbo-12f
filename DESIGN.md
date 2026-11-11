@@ -501,6 +501,8 @@ open.
 
 ```text
 bin/t12                  launcher (resolves the package from its own path)
+bin/t12-container        same CLI inside docker run: no network, read-only root,
+                         paths mounted at their host locations
 t12/
   cli.py                 commands: init/prepare/red/stage/gate/replay/
                          review/green/manifest/status/pause/resume/
