@@ -917,6 +917,43 @@ def cmd_report(args):
     return 0
 
 
+def cmd_board(args):
+    home = _home(args)
+    _config(home)
+    rows = []
+    for name in sorted(os.listdir(os.path.join(home, "runs"))):
+        if not name.endswith(".json") or ".superseded-" in name:
+            continue
+        run = model.load_run(home, name[:-len(".json")])
+        b = run["budgets"]
+        done = run["phase"] in ("local-verified", "stopped")
+        rows.append({
+            "task_id": run["task_id"],
+            "phase": run["phase"],
+            "candidate": (run["candidate"] or {}).get("commit"),
+            "time_left_s": None if done else int(model.time_left_s(run)),
+            "ops_left": None if done else b["op_limit"] - b["ops_used"],
+            "repairs_left": None if done else b["repair_cap"] - b["repairs_used"],
+            "busy": model.is_busy(home, run["task_id"]),
+            "next": model.next_step(run),
+        })
+    if args.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    header = ("TASK", "PHASE", "CANDIDATE", "TIME", "OPS", "REPAIRS", "NEXT")
+    table = [header] + [(
+        r["task_id"], r["phase"] + (" (busy)" if r["busy"] else ""),
+        (r["candidate"] or "-")[:12],
+        "-" if r["time_left_s"] is None else f"{r['time_left_s']}s",
+        "-" if r["ops_left"] is None else str(r["ops_left"]),
+        "-" if r["repairs_left"] is None else str(r["repairs_left"]),
+        r["next"]) for r in rows]
+    widths = [max(len(row[i]) for row in table) for i in range(len(header) - 1)]
+    for row in table:
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)) + "  " + row[-1])
+    return 0
+
+
 def cmd_calibrate(args):
     home = _home(args)
     data = limits.collect(home)
@@ -1093,6 +1130,10 @@ def build_parser():
     p = sub.add_parser("report"); p.add_argument("--home", required=True)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("board", help="one row per run: phase, budget left, and who acts next")
+    p.add_argument("--home", required=True); p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_board)
 
     p = sub.add_parser("calibrate"); p.add_argument("--home", required=True)
     p.add_argument("--apply", action="store_true",
