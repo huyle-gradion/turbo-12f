@@ -55,7 +55,7 @@ merge — a human merges.
 | Command | What it does |
 |---|---|
 | `init` | Bind a repo + state home, create the directory layout |
-| `prepare` | Admit a task: validate repo/base/branch/gates, create worktree + run record |
+| `prepare` | Admit a task: validate repo/base/branch/gates, create worktree + run record (`--supersede` archives a stopped run and starts fresh) |
 | `context` | Print the owned prompt + minimal context for a role (Factor 2/3/9) |
 | `red` | Run the test command, expect failure + marker, commit the test, record red evidence |
 | `stage` | Pin the candidate commit; verify ancestry, clean tree, unchanged test blob |
@@ -65,6 +65,7 @@ merge — a human merges.
 | `manifest` | Write the human-readable evidence summary |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk |
+| `stop` | Stop a run explicitly with a reason (terminal; use `--supersede` to start over) |
 | `escalate` | Record a human question as a tool call and pause (Factor 7) |
 
 ## Task file

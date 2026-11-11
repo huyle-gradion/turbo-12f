@@ -35,7 +35,7 @@ TRANSITIONS = {
     "gates": {"gates", "green", "paused", "stopped"},
     "green": {"local-verified", "paused", "stopped"},
     "local-verified": set(),
-    "paused": {"ready", "red", "gates", "green"},
+    "paused": {"ready", "red", "gates", "green", "stopped"},
     "stopped": set(),
 }
 
@@ -52,7 +52,7 @@ def evidence_dir(home, task_id):
     return os.path.join(home, "evidence", task_id)
 
 
-def new_run(task, repo, home):
+def new_run(task, repo, home, supersedes=None):
     now = time.time()
     gates = []
     for g in task.get("gates", []):
@@ -77,6 +77,7 @@ def new_run(task, repo, home):
         "worktree": os.path.join(home, "worktrees", task["id"]),
         "phase": "unadmitted",
         "prior_phase": None,
+        "supersedes": supersedes,
         "created_at": now,
         "config_digest": store.sha256_bytes(store.canonical_json(task)),
         "budgets": {
@@ -103,6 +104,20 @@ def load_run(home, task_id):
     if run.get("version") != VERSION:
         raise StateError(f"unsupported run version: {run.get('version')}")
     return run
+
+
+def archive_run(home, run):
+    """Supersession, not reset: move the old run record and its event
+    log aside under a timestamped name. Nothing is overwritten or
+    deleted; the archived record keeps every SHA and evidence ref."""
+    ts = int(time.time())
+    base = f"{run['task_id']}.superseded-{ts}"
+    os.replace(run_path(home, run["task_id"]),
+               os.path.join(home, "runs", f"{base}.json"))
+    ev_src = events_path(home, run["task_id"])
+    if os.path.exists(ev_src):
+        os.replace(ev_src, os.path.join(home, "runs", f"{base}.events.jsonl"))
+    return base
 
 
 def save_run(home, run):

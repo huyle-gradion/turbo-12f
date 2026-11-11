@@ -199,6 +199,29 @@ pointer, not as a Dex citation.)
   exists and passed. A missing or failing gate is a Verification
   miss; the run is unverified until it passes.
 
+## Supersession and stop (Phase 2)
+
+Runs are never overwritten and never silently reset. Stopping is an
+explicit, recorded act: `stop --reason ...` moves any active phase
+(including `paused`) to `stopped` with the reason in the record and
+the event log. A stopped run cannot move again.
+
+Starting over on the same task uses supersession, not reset:
+`prepare --supersede` requires the existing run to be `stopped`
+(active runs are refused with "stop it first"), archives the old run
+record and its event log under a timestamped name
+(`runs/<id>.superseded-<ts>.json`), removes the old disposable
+worktree and factory branch, and records `supersedes` in the new run.
+The archived record keeps every SHA and evidence ref, so the old
+attempt stays inspectable. Counters (ops, repairs, wall time) start
+fresh in the new run — the new attempt is a new attempt, not a
+continuation that hides its history.
+
+Resume consistency: `resume` re-validates from disk before returning
+to the prior phase — worktree branch, HEAD against the expected
+commit for that phase, red test blob, and every recorded evidence
+ref re-hashed. Any drift fails closed and the run stays paused.
+
 ## Layout
 
 ```text
@@ -240,8 +263,14 @@ examples/                a sample task file
 
 1. **Minimal evidence runner** — this scaffold: init, prepare, red,
    stage, gate, replay, green, manifest, status, pause/resume.
-2. **State machine hardening** — property tests on transitions,
-   supersession instead of unsafe reset, resume consistency.
+2. **State machine hardening — DONE 2026-11-11.** Property tests
+   on transitions (`tests/test_model.py`: the matrix is written as
+   an independent spec, so weakening a transition fails the test),
+   explicit `stop`, supersession instead of unsafe reset
+   (`prepare --supersede` archives the old run + events and deletes
+   the disposable worktree/branch; active runs must be stopped
+   first), and resume re-validates HEAD, test blob, *and* every
+   evidence hash before continuing.
 3. **Safe execution** — sandbox adapters, safety probes (attempt the
    forbidden access, verify it is denied).
 4. **Evidence integrity** — signed manifests, config digests across

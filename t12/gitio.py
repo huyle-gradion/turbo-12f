@@ -3,6 +3,7 @@ worker's claim about which commit was tested or reviewed.
 """
 
 import os
+import shutil
 
 from . import runner
 from .errors import GitError
@@ -80,6 +81,21 @@ def add_worktree(repo, worktree_path, branch, base):
 
 def remove_worktree(repo, worktree_path):
     git_ok(repo, "worktree", "remove", "--force", str(worktree_path))
+
+
+def remove_worktree_force(repo, worktree_path):
+    """Remove a worktree even if its metadata is stale: try the normal
+    removal, then prune and remove the directory."""
+    obs = git(repo, "worktree", "remove", "--force", str(worktree_path))
+    if obs["exit_code"] == 0 and not obs["timed_out"]:
+        return
+    git(repo, "worktree", "prune")
+    if os.path.isdir(worktree_path):
+        shutil.rmtree(worktree_path)
+
+
+def delete_branch(repo, branch):
+    git_ok(repo, "branch", "-D", branch)
 
 
 def commit_file(repo, rel_path, message):

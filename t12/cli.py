@@ -175,19 +175,36 @@ def cmd_prepare(args):
     task_id = task.get("id", "")
     if not TASK_ID_RE.match(task_id):
         raise StateError(f"task id must match {TASK_ID_RE.pattern}: {task_id!r}")
-    if os.path.exists(model.run_path(home, task_id)):
-        raise StateError(f"run already exists for task {task_id!r}; refusing to overwrite")
     repo = config["repo"]
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
     gitio.rev_parse(repo, base)
-    run = model.new_run(task, repo, home)
+    supersedes = None
+    if os.path.exists(model.run_path(home, task_id)):
+        if not args.supersede:
+            raise StateError(
+                f"run already exists for task {task_id!r}; refusing to overwrite — "
+                "stop it, then re-run prepare with --supersede"
+            )
+        old = model.load_run(home, task_id)
+        if old["phase"] != "stopped":
+            raise StateError(
+                f"cannot supersede: run is {old['phase']!r}; stop it first"
+            )
+        supersedes = model.archive_run(home, old)
+        # The old worktree and factory branch are disposable working
+        # state; the archived run record keeps every SHA and ref.
+        gitio.remove_worktree_force(repo, old["worktree"])
+        if gitio.branch_exists(repo, old["branch"]):
+            gitio.delete_branch(repo, old["branch"])
+    run = model.new_run(task, repo, home, supersedes=supersedes)
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base)
     model.transition(run, "ready")
-    _save(home, run, "prepared", {"branch": run["branch"], "base": base})
+    _save(home, run, "prepared", {"branch": run["branch"], "base": base,
+                                  "supersedes": supersedes})
     print(f"ready: task={task_id} worktree={run['worktree']} branch={run['branch']}")
     return 0
 
@@ -487,10 +504,34 @@ def cmd_resume(args):
         )
     if run["red"] and gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing resume: red test file changed while paused")
+    # Resume consistency: every recorded evidence ref must still hash
+    # to what was recorded. A changed byte while paused fails closed.
+    refs = []
+    if run["red"]:
+        refs.append(run["red"]["output"])
+    if run["replay"]:
+        refs.append(run["replay"]["output"])
+    for gate in run["gates"]:
+        if gate["observation"]:
+            refs.append(gate["observation"])
+    for ref in refs:
+        evidence.verify_ref(home, run["task_id"], ref)
     model.transition(run, prior)
     run["prior_phase"] = None
     _save(home, run, "resumed", {"phase": prior})
     print(f"resumed: task={run['task_id']} phase={prior}")
+    return 0
+
+
+def cmd_stop(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] in ("local-verified", "stopped"):
+        raise StateError(f"cannot stop from phase {run['phase']!r}")
+    run["stop_reason"] = args.reason
+    model.transition(run, "stopped")
+    _save(home, run, "stopped", {"reason": args.reason})
+    print(f"stopped: task={run['task_id']} — {args.reason}")
     return 0
 
 
@@ -518,6 +559,8 @@ def build_parser():
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("prepare"); p.add_argument("--home", required=True); p.add_argument("--task", required=True)
+    p.add_argument("--supersede", action="store_true",
+                   help="archive a stopped run for this task and start a fresh one")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("context"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
@@ -555,6 +598,10 @@ def build_parser():
 
     p = sub.add_parser("resume"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("stop"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_stop)
 
     p = sub.add_parser("escalate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--question", required=True)

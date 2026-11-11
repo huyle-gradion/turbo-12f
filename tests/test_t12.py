@@ -136,6 +136,10 @@ class CliCase(unittest.TestCase):
             text = fh.read()
         self.assertIn("local-verified", text)
         self.assertIn("unit: passed", text)
+        # Terminal success cannot be stopped.
+        self.t12("stop", "--home", self.home, "--task-id", "demo-1",
+                 "--reason", "too late", expect=1)
+        self.assertEqual(self.phase(), "local-verified")
 
     def test_green_without_replay_is_refused(self):
         self.do_red()
@@ -206,6 +210,61 @@ class CliCase(unittest.TestCase):
         self.commit_worktree("feat: drift while paused")
         result = self.t12("resume", "--home", self.home, "--task-id", "demo-1", expect=1)
         self.assertIn("HEAD moved while paused", result.stderr)
+
+    def test_stop_from_paused(self):
+        self.do_red()
+        self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
+        self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "abandoned")
+        self.assertEqual(self.phase(), "stopped")
+        status = json.loads(self.t12(
+            "status", "--home", self.home, "--task-id", "demo-1").stdout)
+        self.assertEqual(status["stop_reason"], "abandoned")
+        # A stopped run cannot move again.
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", expect=1)
+
+    def test_supersede_active_run_refused(self):
+        self.do_red()
+        result = self.t12("prepare", "--home", self.home, "--task", self.task_path,
+                          "--supersede", expect=1)
+        self.assertIn("stop it first", result.stderr)
+        self.assertEqual(self.phase(), "red")
+
+    def test_stop_then_supersede_and_rerun(self):
+        self.do_red()
+        self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "bad approach")
+        self.assertEqual(self.phase(), "stopped")
+        # Plain prepare refuses to overwrite.
+        self.t12("prepare", "--home", self.home, "--task", self.task_path, expect=1)
+        # Supersede archives the old run and starts fresh.
+        self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede")
+        self.assertEqual(self.phase(), "ready")
+        archived = [f for f in os.listdir(os.path.join(self.home, "runs"))
+                    if "superseded" in f and f.endswith(".json")
+                    and not f.endswith(".events.jsonl")]
+        self.assertTrue(archived, "old run was not archived")
+        with open(os.path.join(self.home, "runs", archived[0])) as fh:
+            old = json.load(fh)
+        self.assertEqual(old["phase"], "stopped")
+        # The fresh run records what it superseded, and can go all the way.
+        status = json.loads(self.t12(
+            "status", "--home", self.home, "--task-id", "demo-1").stdout)
+        self.assertEqual(status["phase"], "ready")
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.phase(), "local-verified")
+
+    def test_resume_refuses_tampered_evidence(self):
+        self.do_red()
+        self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
+        red_out = os.path.join(self.home, "evidence", "demo-1", "red-output.txt")
+        with open(red_out, "a") as fh:
+            fh.write("tampered while paused\n")
+        result = self.t12("resume", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("evidence changed", result.stderr)
+        self.assertEqual(self.phase(), "paused")
 
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
