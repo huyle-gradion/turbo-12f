@@ -204,7 +204,7 @@ def resolve_adapter(task):
         f"unknown sandbox_adapter {requested!r}; use 'docker', 'landlock', or 'auto'")
 
 
-def docker_run_argv(image, worktree, verify_home, env, argv):
+def docker_run_argv(image, worktree, verify_home, env, argv, read_only=()):
     """`docker run` argv for one verification command. The container
     gets no network (not even to the host), the worktree and the
     verify-home mounted at their host paths, the host user's uid/gid
@@ -216,6 +216,7 @@ def docker_run_argv(image, worktree, verify_home, env, argv):
         "docker", "run", "--rm", "--network", "none",
         "-v", f"{worktree}:{worktree}:rw",
         "-v", f"{verify_home}:{verify_home}:rw",
+        *[arg for path in read_only for arg in ("-v", f"{path}:{path}:ro")],
         "-w", worktree,
         "--user", f"{os.getuid()}:{os.getgid()}",
     ]
@@ -225,7 +226,7 @@ def docker_run_argv(image, worktree, verify_home, env, argv):
     return docker_argv
 
 
-def landlock_preexec(worktree, verify_home):
+def landlock_preexec(worktree, verify_home, read_only=()):
     """Build a preexec function that cages the child: worktree and
     verify-home writable, system dirs read-only, all TCP denied.
     Raises OSError in the child if the cage cannot be built, which
@@ -263,6 +264,8 @@ def landlock_preexec(worktree, verify_home):
                 _add_rule("/dev", _FS_RO_DIR)
             for path in (worktree, verify_home):
                 _add_rule(path, _FS_RW)
+            for path in read_only:
+                _add_rule(path, _FS_RO_DIR if os.path.isdir(path) else _FS_RO_FILE)
             if int(libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) != 0:
                 raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS failed")
             if int(libc.syscall(_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)) != 0:

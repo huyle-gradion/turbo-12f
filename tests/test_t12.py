@@ -5,6 +5,7 @@ the real CLI end to end.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -827,7 +828,6 @@ class CliCase(unittest.TestCase):
             home, task = self.prepare_custom("demo-bad", verify_deps=bad)
             result = self.t12("prepare", "--home", home, "--task", task, expect=1)
             self.assertIn("verify_deps", result.stderr)
-            import shutil
             shutil.rmtree(home)
 
     def act(self, role, session, output, expect=0):

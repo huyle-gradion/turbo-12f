@@ -14,7 +14,7 @@ import sys
 import time
 
 from . import delivery as delivery_mod
-from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store
+from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store, tools
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -83,12 +83,33 @@ def _verification(home, run, worktree):
     return env, ctx
 
 
-def _run_on_candidate(home, run, wt, argv):
+def _run_on_commit(home, run, wt, commit, argv):
+    """Run a verification command in a fresh checkout of `commit`, with
+    the task's declared dependency folders linked in read-only."""
     path = model.verify_checkout_dir(home, run["task_id"])
-    with gitio.detached_checkout(wt, path, run["candidate"]["commit"]) as checkout:
+    with gitio.detached_checkout(wt, path, commit) as checkout:
         env, ctx = _verification(home, run, checkout)
-        return runner.run(argv, cwd=checkout, timeout_s=_time_left(run),
-                          env=env, sandbox=ctx)
+        ctx["read_only"] = _link_deps(run, wt, checkout)
+        obs = runner.run(argv, cwd=checkout, timeout_s=_time_left(run),
+                         env=env, sandbox=ctx)
+    obs["deps"] = list(run.get("verify_deps") or [])
+    return obs
+
+
+def _link_deps(run, wt, checkout):
+    real = []
+    for dep in run.get("verify_deps") or []:
+        source = os.path.join(wt, dep)
+        target = os.path.join(checkout, dep)
+        if not os.path.exists(source):
+            raise StateError(f"declared dependency missing in the worktree: {dep}")
+        if os.path.lexists(target):
+            raise StateError(f"declared dependency {dep} is tracked in the commit; "
+                             "verify_deps must name untracked paths")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        os.symlink(source, target)
+        real.append(os.path.realpath(source))
+    return real
 
 
 def _require_probes(run):
@@ -335,6 +356,11 @@ def cmd_context(args):
         "prior_review": prior_review,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
+        "human_responses": [
+            {"question": e["question"], "answer": e["answer"]}
+            for e in run.get("escalations") or [] if e["answer"] is not None
+        ],
+        "tools": tools.schema_for(args.role),
     }
     print(prompt)
     print("--- context (JSON) ---")
@@ -357,14 +383,16 @@ def cmd_red(args):
     dirty = set(gitio.dirty_paths(wt))
     if dirty - {test_path}:
         raise StateError(f"refusing red: unrelated dirty files: {sorted(dirty - {test_path})}")
+    if test_path not in dirty:
+        raise StateError(f"refusing red: {test_path} has no changes to commit")
     try:
         command = shlex.split(args.command)
     except ValueError as exc:
         raise StateError(f"cannot parse --command: {exc}") from exc
     if not command:
         raise StateError("--command must not be empty")
-    env, ctx = _verification(home, run, wt)
-    obs = runner.run(command, cwd=wt, timeout_s=_time_left(run), env=env, sandbox=ctx)
+    commit = gitio.commit_with_path(wt, test_path, f"test({run['task_id']}): red test")
+    obs = _run_on_commit(home, run, wt, commit, command)
     if obs["timed_out"] or obs["exit_code"] == 0:
         _save(home, run, "red-failed", {
             "step": "red", "exit_code": obs["exit_code"],
@@ -383,7 +411,7 @@ def cmd_red(args):
         })
         raise StateError(f"red output lacks the expected failure marker: {args.marker!r}")
     ref = evidence.write_observation(home, run["task_id"], "red-output.txt", obs)
-    commit = gitio.commit_file(wt, test_path, f"test({run['task_id']}): red test")
+    gitio.move_branch_to(wt, commit)
     run["red"] = {
         "test_path": test_path,
         "command": command,
@@ -442,7 +470,7 @@ def cmd_gate(args):
     wt = _check_candidate_tree(run, "gate")
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
-    obs = _run_on_candidate(home, run, wt, gate["command"])
+    obs = _run_on_commit(home, run, wt, run["candidate"]["commit"], gate["command"])
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
     gate["commit"] = run["candidate"]["commit"]
@@ -490,7 +518,7 @@ def cmd_replay(args):
     model.check_budgets(run)
     _require_probes(run)
     wt = _check_candidate_tree(run, "replay")
-    obs = _run_on_candidate(home, run, wt, run["red"]["command"])
+    obs = _run_on_commit(home, run, wt, run["candidate"]["commit"], run["red"]["command"])
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
         _save(home, run, "replay-failed", {
@@ -715,6 +743,8 @@ def cmd_verify(args):
                 exit_problems.append(
                     f"gate {gate['name']!r} passed but its observation failed or timed out"
                 )
+            if run["candidate"] and gate.get("commit") != run["candidate"]["commit"]:
+                exit_problems.append(f"gate {gate['name']!r} was not run on the candidate")
     check("exit-codes", not exit_problems, "; ".join(exit_problems[:3]))
 
     wt_ok, wt_detail = True, ""
@@ -824,6 +854,14 @@ def cmd_resume(args):
     run = _run(home, args.task_id)
     if run["phase"] != "paused":
         raise StateError(f"resume requires phase 'paused', run is {run['phase']!r}")
+    pending = model.open_escalation(run)
+    if pending and not args.answer:
+        raise StateError(
+            f"run is waiting on a human answer to: {pending['question']!r}; "
+            "resume with --answer"
+        )
+    if args.answer and not pending:
+        raise StateError("no open question to answer; resume without --answer")
     prior = run["prior_phase"]
     wt = _check_worktree(run)
     repo = _config(home)["repo"]
@@ -854,6 +892,10 @@ def cmd_resume(args):
     for ref in refs:
         evidence.verify_ref(home, run["task_id"], ref)
     _verify_chain_or_raise(home, run)
+    if pending:
+        pending["answer"] = args.answer
+        pending["answered_at"] = time.time()
+        _save(home, run, "human-response", {"question": pending["question"], "answer": args.answer})
     model.transition(run, prior)
     run["prior_phase"] = None
     _save(home, run, "resumed", {"phase": prior})
@@ -932,10 +974,52 @@ def cmd_escalate(args):
     if run["phase"] in ("local-verified", "stopped", "paused"):
         raise StateError(f"cannot escalate from phase {run['phase']!r}")
     run["prior_phase"] = run["phase"]
-    run["escalation"] = {"question": args.question, "ts": time.time()}
+    run.setdefault("escalations", []).append({
+        "question": args.question, "asked_at": time.time(),
+        "answer": None, "answered_at": None,
+    })
     model.transition(run, "paused")
     _save(home, run, "human-contact", {"question": args.question})
     print(f"escalated to human (run paused): {args.question}")
+    return 0
+
+
+def cmd_act(args):
+    """Factor 4: a worker's output is a tool call. Record it, validate it
+    against the registry, then run the step it maps to. A malformed
+    output is a failed step that costs an operation, never a guess."""
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] in ("local-verified", "stopped"):
+        raise StateError(f"run is {run['phase']}; no further worker output is accepted")
+    with open(args.input, "rb") as fh:
+        data = fh.read()
+    seq = len(model.read_events(home, run["task_id"])) + 1
+    ref = evidence.write_evidence(home, run["task_id"], f"worker-output-{seq}.json", data)
+    try:
+        tool, targs = tools.parse(data.decode("utf-8", "replace"), args.role)
+        model.check_session(run, args.role, args.session)
+    except StateError as exc:
+        model.bump_op(run)
+        _save(home, run, "worker-output-rejected",
+              {"role": args.role, "output": ref, "error": str(exc)})
+        raise
+    _save(home, run, "worker-output", {"role": args.role, "tool": tool, "output": ref})
+    step = dict(home=args.home, task_id=args.task_id, session=args.session)
+    if tool == "red_test_ready":
+        return cmd_red(argparse.Namespace(
+            **step, test_path=targs["test_path"],
+            command=shlex.join(targs["command"]), marker=targs["marker"]))
+    if tool == "implementation_ready":
+        return cmd_stage(argparse.Namespace(**step))
+    if tool == "review":
+        verdict = "approve" if targs["verdict"] == "merge-ready" else "changes-requested"
+        return cmd_review(argparse.Namespace(
+            **step, role=args.role, verdict=verdict, report=args.input))
+    if tool == "escalate":
+        return cmd_escalate(argparse.Namespace(
+            home=args.home, task_id=args.task_id, question=targs["question"]))
+    print(f"{tool}: recorded for {args.role}")
     return 0
 
 
@@ -1022,6 +1106,7 @@ def build_parser():
     p.set_defaults(func=cmd_pause)
 
     p = sub.add_parser("resume"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--answer", help="the human's answer to an open escalation (Factor 7)")
     p.set_defaults(func=cmd_resume)
 
     p = sub.add_parser("stop"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
@@ -1031,6 +1116,12 @@ def build_parser():
     p = sub.add_parser("escalate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--question", required=True)
     p.set_defaults(func=cmd_escalate)
+
+    p = sub.add_parser("act"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--role", required=True, choices=list(model.SESSION_ROLES))
+    p.add_argument("--session", required=True, help="the host's id for the worker session that produced the output")
+    p.add_argument("--input", required=True, help="the worker's JSON output (stored as evidence)")
+    p.set_defaults(func=cmd_act)
 
     return parser
 

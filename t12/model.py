@@ -155,6 +155,20 @@ def record_measurements(run):
     return run["measurements"]
 
 
+def _is_worktree_path(path):
+    if not isinstance(path, str) or not path or os.path.isabs(path):
+        return False
+    first = os.path.normpath(path).split(os.sep)[0]
+    return first not in ("..", ".", ".git")
+
+
+def open_escalation(run):
+    escalations = run.get("escalations") or []
+    if escalations and escalations[-1]["answer"] is None:
+        return escalations[-1]
+    return None
+
+
 def new_run(task, repo, home, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
@@ -184,6 +198,11 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
             r not in REVIEW_ROLES for r in required_reviews):
         raise StateError(
             f"required_reviews must be a list of {list(REVIEW_ROLES)}: {required_reviews!r}"
+        )
+    verify_deps = task.get("verify_deps", [])
+    if not isinstance(verify_deps, list) or not all(_is_worktree_path(d) for d in verify_deps):
+        raise StateError(
+            f"verify_deps must be a list of relative paths inside the worktree: {verify_deps!r}"
         )
     return {
         "version": VERSION,
@@ -221,6 +240,8 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),
+        "verify_deps": [os.path.normpath(d) for d in verify_deps],
+        "escalations": [],
         "deliveries": [],
         "github_repo": task.get("github_repo"),
         "asana_task_gid": task.get("asana_task_gid"),
