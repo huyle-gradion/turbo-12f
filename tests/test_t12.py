@@ -717,6 +717,17 @@ class CliCase(unittest.TestCase):
         result = self.t12("replay", "--home", self.home, "--task-id", "demo-1", expect=1)
         self.assertIn("uncommitted changes", result.stderr)
 
+    def test_gate_ignores_files_outside_the_candidate(self):
+        self.do_red()
+        self.write_worktree(".gitignore", "app_fix.py\n")
+        self.write_worktree("app.py", "from app_fix import greet\n")
+        self.commit_worktree("feat: greet from an ignored module")
+        self.write_worktree("app_fix.py", APP_V2)
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                          "--name", "unit", "--session", "sess-qa", expect=1)
+        self.assertIn("gate 'unit' failed", result.stderr)
+
     def test_green_refuses_gate_bound_to_another_commit(self):
         self.do_red()
         self.do_implement_and_stage()
