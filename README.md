@@ -97,6 +97,7 @@ merge — a human merges.
 | `deliver` | Record an adapter's report as evidence: `--adapter github\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
 | `board` | One row per run: phase, candidate, budget left, whether a command is running on it, and who acts next (`--json` for scripts) |
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
+| `retro` | Lessons that recur across runs (gate failures and suite time per gate, rejected worker outputs, review finding classes, repeated escalations), each with a proposed check; changes nothing (`--min N`, `--json`) |
 | `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk (`--answer TEXT` is required while an escalation is open, and records the human's reply) |
@@ -185,6 +186,18 @@ merge commits for factory branches.
 Runs prepared before `touches` existed carry no `base_commit`, so
 `stage` skips the `touches` and policy checks for them. Finish or
 supersede them before relying on either.
+
+## Improving the factory
+
+`t12 retro` reads every run's event log and structured reviews and
+lists what keeps recurring: a gate that fails in most runs, a worker
+output rejected for the same reason, a review finding class, a
+question escalated again and again. Each comes with a proposed check.
+Prefer a check (a gate, a probe, a refusal in `stage`, a stricter
+field in `tools.py`) over more prompt text: a worker can ignore a
+prompt, not a check. Like `calibrate`, `retro` only proposes. Turn a
+proposal into a task file and run it through the factory; a human
+merges.
 
 ## Running in a container
 
