@@ -156,6 +156,7 @@ source applied (`budget_source`).
 the whole factory inside `docker run`:
 
 ```sh
+docker build -t turbo-12f container/
 bin/t12-container init --repo /path/to/product --home /path/to/state-home
 bin/t12-container prepare --home /path/to/state-home --task examples/task.json
 ```
@@ -174,12 +175,15 @@ from the host and from the container in either order. Your
 `GIT_AUTHOR_*` and `GIT_COMMITTER_*`. Nothing else from your
 environment goes in.
 
-The image comes from `T12_IMAGE` (default `python:3.12`). It must
-contain `python3`, `git`, and every tool your gate commands call,
-and it must already be present locally. The launcher does not pull
-it. Verification inside the container uses Landlock, as it does on
+The image comes from `T12_IMAGE` (default `turbo-12f`, built from
+`container/Dockerfile` with `python3`, `git`, and `pytest`). It must
+contain every tool your gate commands call, so add yours to the
+Dockerfile or point `T12_IMAGE` at your own image. The image must
+already be present locally. The launcher does not pull or build it. Verification inside the container uses Landlock, as it does on
 the host. The `docker` sandbox adapter is not available inside the
-container.
+container, and a task that requests it is refused at `prepare`.
+Reaching Docker from inside would mean mounting the Docker socket,
+which gives the container root on the host.
 
 ## Tests
 
@@ -189,4 +193,6 @@ bash scripts/smoke.sh
 T12=bin/t12-container bash scripts/smoke.sh   # the same smoke, in a container
 ```
 
-Both run against disposable repos only.
+All three run against disposable repos only. The docker adapter tests
+run against a fake `docker` stub, and also against the real daemon
+when Docker answers and the `python:3.12` image is present locally.

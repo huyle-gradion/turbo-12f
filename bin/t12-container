@@ -6,10 +6,10 @@
 set -euo pipefail
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
-IMAGE="${T12_IMAGE:-python:3.12}"
+IMAGE="${T12_IMAGE:-turbo-12f}"
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  echo "t12-container: image $IMAGE is not present locally (pull or build it first; no implicit pulls)" >&2
+  echo "t12-container: image $IMAGE is not present locally; build it with: docker build -t turbo-12f $ROOT/container (or set T12_IMAGE; no implicit pulls)" >&2
   exit 1
 fi
 
