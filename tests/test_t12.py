@@ -1120,6 +1120,9 @@ class CliCase(unittest.TestCase):
                         "--session", session, "--input", path, expect=expect)
 
     def run_with_recurring_mistakes(self, home, task_id):
+        self.act_in(home, task_id, "reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "verification": "too early",
+            "findings": [{"id": "R0", "class": ["Bug"], "severity": "Blocker"}]}}, expect=1)
         self.act_in(home, task_id, "test-writer", "sess-tw", {"tool": "red_test_ready", "args": {
             "test_path": "tests/test_greet.py", "command": ["python3", "t.py"]}}, expect=1)
         self.t12("escalate", "--home", home, "--task-id", task_id, "--question", "Which locale?")
@@ -1172,6 +1175,7 @@ class CliCase(unittest.TestCase):
         self.assertEqual(set(kinds), {"gate", "rejected-output", "finding", "escalation"})
         self.assertIn("unit failed in 2 of 2 runs", kinds["gate"]["evidence"])
         self.assertIn("Verification miss in 2 of 2", kinds["finding"]["evidence"])
+        self.assertEqual(report["runs_with_finding"], {"Verification miss": 2})
         self.assertIn("Which locale?", kinds["escalation"]["evidence"])
         self.assertIn("missing", kinds["rejected-output"]["evidence"])
         text = self.t12("retro", "--home", home, "--min", "2").stdout

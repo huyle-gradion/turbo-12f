@@ -28,7 +28,8 @@ def _events(path):
 def _review_findings(home, event):
     """Finding classes from a structured review a worker submitted
     through `act`, or None when its stored output no longer matches
-    the recorded hash."""
+    the recorded hash. It counts only if the next event records the
+    review; `act` logs the output before the review step can refuse."""
     ref = event["detail"]["output"]
     path = os.path.join(model.evidence_dir(home, event["task_id"]), ref["name"])
     try:
@@ -37,8 +38,8 @@ def _review_findings(home, event):
         output = store.load_json(path)
     except (OSError, ValueError):
         return None
-    return [f.get("class", "unclassified") for f in output["args"]["findings"]
-            if isinstance(f, dict)]
+    return [f["class"] if isinstance(f.get("class"), str) else "unclassified"
+            for f in output["args"]["findings"] if isinstance(f, dict)]
 
 
 def collect(home):
@@ -54,8 +55,14 @@ def collect(home):
         runs += 1
         run_name = os.path.basename(log)[:-len(".events.jsonl")]
         classes_seen = set()
+        submitted = None
         for event in _events(log):
             kind, detail = event.get("type"), event.get("detail") or {}
+            if kind == "reviewed" and submitted is not None:
+                reviews += 1
+                reviewed_runs.add(run_name)
+                classes_seen.update(submitted)
+            submitted = None
             if kind in ("gate-passed", "gate-failed"):
                 gate = gates[detail.get("gate") or detail.get("step")]
                 gate["runs"].add(run_name)
@@ -71,13 +78,9 @@ def collect(home):
             elif kind == "human-contact":
                 escalations[detail.get("question", "").strip()].add(run_name)
             elif kind == "worker-output" and detail.get("tool") == "review":
-                classes = _review_findings(home, event)
-                if classes is None:
+                submitted = _review_findings(home, event)
+                if submitted is None:
                     unreadable += 1
-                    continue
-                reviews += 1
-                reviewed_runs.add(run_name)
-                classes_seen.update(classes)
         findings.update(classes_seen)
     return {
         "runs": runs,
