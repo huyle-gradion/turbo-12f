@@ -13,6 +13,7 @@ import shlex
 import sys
 import time
 
+from . import delivery as delivery_mod
 from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store
 from .errors import StateError, T12Error
 
@@ -544,6 +545,58 @@ def cmd_review(args):
     return 0
 
 
+def cmd_deliver(args):
+    """Record an adapter's delivery report as evidence. The core
+    never touches the network: the adapter did the remote work and
+    wrote the report; this command checks the report's shape, pins
+    it to the reviewed head, and enforces the uncertain block."""
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if args.adapter not in delivery_mod.ADAPTERS:
+        raise StateError(f"unknown adapter {args.adapter!r}; adapters are {list(delivery_mod.ADAPTERS)}")
+    delivery_mod.check_allowed(run, args.adapter, args.resolves)
+    _verify_chain_or_raise(home, run)
+    wt = _check_worktree(run)
+    if gitio.head(wt) != run["candidate"]["commit"]:
+        raise StateError("refusing deliver: HEAD moved since stage")
+    report_path = os.path.abspath(args.report)
+    if not os.path.isfile(report_path):
+        raise StateError(f"delivery report not found: {args.report}")
+    try:
+        with open(report_path, encoding="utf-8") as fh:
+            report = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise StateError(f"delivery report is not valid JSON: {exc}") from exc
+    if not isinstance(report, dict):
+        raise StateError("delivery report must be a JSON object")
+    if report.get("adapter") != args.adapter:
+        raise StateError(
+            f"delivery report is for adapter {report.get('adapter')!r}, "
+            f"not {args.adapter!r}"
+        )
+    if report.get("task_id") not in (None, run["task_id"]):
+        raise StateError(
+            f"delivery report is for task {report.get('task_id')!r}, "
+            f"not {run['task_id']!r}"
+        )
+    with open(report_path, "rb") as fh:
+        data = fh.read()
+    if not data.strip():
+        raise StateError("delivery report is empty")
+    n = len([d for d in run.get("deliveries") or [] if d["adapter"] == args.adapter]) + 1
+    ref = evidence.write_evidence(
+        home, run["task_id"], f"delivery-{args.adapter}-{n}.json", data)
+    entry = delivery_mod.record_delivery(run, args.adapter, report, ref)
+    _save(home, run, "delivered", {
+        "adapter": args.adapter, "outcome": entry["outcome"],
+        "head": entry["head"][:12] if entry["head"] else None,
+        "ref": entry["ref"], "resolves": bool(args.resolves),
+    })
+    print(f"deliver: {args.adapter} {entry['outcome']}"
+          + (f" ref={entry['ref']}" if entry["ref"] else ""))
+    return 0
+
+
 def cmd_green(args):
     home = _home(args)
     run = _run(home, args.task_id)
@@ -615,6 +668,8 @@ def cmd_verify(args):
             refs.append((f"probe:{probe['name']}", probe["output"]))
     for review in run.get("reviews") or []:
         refs.append((f"review:{review['role']}", review["report"]))
+    for entry in run.get("deliveries") or []:
+        refs.append((f"delivery:{entry['adapter']}", entry["report"]))
     ref_problems = []
     for label, ref in refs:
         try:
@@ -728,6 +783,7 @@ def cmd_status(args):
             "repair_cap": run["budgets"]["repair_cap"],
         },
         "stop_reason": run["stop_reason"],
+        "deliveries": run.get("deliveries", []),
     }, indent=2, sort_keys=True))
     return 0
 
@@ -915,6 +971,13 @@ def build_parser():
 
     p = sub.add_parser("verify"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("deliver"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--adapter", required=True, choices=list(delivery_mod.ADAPTERS))
+    p.add_argument("--report", required=True, help="adapter report JSON (outcome, head, ref)")
+    p.add_argument("--resolves", action="store_true",
+                   help="this report resolves a previous uncertain outcome (read-back, not a new action)")
+    p.set_defaults(func=cmd_deliver)
 
     p = sub.add_parser("report"); p.add_argument("--home", required=True)
     p.add_argument("--json", action="store_true")

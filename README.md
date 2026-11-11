@@ -54,6 +54,26 @@ so the test-writer cannot stage and the builder cannot review. A
 task lists the reviews green requires in `required_reviews`
 (default `["reviewer"]`; add `"security"` when it matters).
 
+## Delivery
+
+The core never touches the network. Adapters do the remote work and
+write a report; `t12 deliver` records it:
+
+```bash
+export GITHUB_TOKEN=...   # or ASANA_TOKEN for the Asana adapter
+python3 adapters/github.py create-pr --home /path/to/state-home \
+  --task-id demo-1 --out delivery.json
+bin/t12 deliver --home /path/to/state-home --task-id demo-1 \
+  --adapter github --report delivery.json
+```
+
+Outcomes: `confirmed` (remote read back and matching), `rejected`
+(remote said no), `denied` (mutation refused for permission),
+`uncertain` (state unknown). An uncertain outcome blocks further
+delivery for that adapter until a read-back report is recorded
+with `--resolves` — never retry the action blind. The adapter
+never merges; a human merges the PR. See `adapters/README.md`.
+
 `local-verified` means the configured evidence chain was observed and
 is internally consistent. It is not acceptance and not permission to
 merge — a human merges.
@@ -74,6 +94,7 @@ merge — a human merges.
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |
+| `deliver` | Record an adapter's report as evidence: `--adapter github\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
 | `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |

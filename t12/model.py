@@ -216,6 +216,9 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),
+        "deliveries": [],
+        "github_repo": task.get("github_repo"),
+        "asana_task_gid": task.get("asana_task_gid"),
     }
 
 

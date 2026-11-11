@@ -413,6 +413,64 @@ claim is recorded. If the host cannot be trusted to hand out
 distinct sessions per role, the separation is only as strong as
 the host — that is stated here rather than papered over.
 
+## Delivery (Phase 7)
+
+Delivery is where the factory meets the outside world, so it is
+where the discipline matters most. The split is strict:
+
+- **The core never touches the network.** It holds no tokens and
+  makes no HTTP calls. `t12 deliver --adapter github|asana
+  --report report.json [--resolves]` only records a report an
+  adapter already wrote: it checks the report's shape, pins it to
+  the reviewed head, enforces the uncertain block, stores the
+  report as hashed evidence, and appends a `delivered` event.
+  `verify` re-hashes delivery reports like any other evidence,
+  and `status` lists the deliveries.
+- **Adapters do the remote work.** `adapters/github.py create-pr`
+  and `adapters/asana.py complete` are standalone stdlib-only
+  scripts. Tokens come from the environment (`GITHUB_TOKEN`,
+  `ASANA_TOKEN`); the repo comes from `--repo`, the task's
+  `github_repo` field, or the origin remote; the Asana task from
+  `--task` or the task's `asana_task_gid` field. An adapter exits
+  0 when it wrote a report, whatever the outcome — a non-zero
+  exit means the adapter itself could not run.
+- **Outcomes mean what they say.** `confirmed` only when the
+  remote state was read back and matches: the PR exists with the
+  reviewed head SHA, the Asana task is complete. `rejected` when
+  the remote definitively said no (the PR's head is a different
+  commit, the branch is not pushed, the task does not exist).
+  `denied` when the mutation was refused for permission (403 on
+  the create/complete call). `uncertain` when the state is
+  unknown (timeout, 5xx, a read that failed).
+- **Never a blind retry.** An uncertain outcome blocks further
+  delivery for that adapter. The next attempt must be a read-back
+  recorded with `--resolves`, not a repeated action — a blind
+  retry after an uncertain mutation can duplicate the effect (a
+  second PR, a second comment) or miss that the first one landed.
+  The block is per adapter; one adapter's uncertainty does not
+  stop the other.
+- **Two mislabelings are ruled out** — both were real findings in
+  the original Turbo's integration work. A 401/403 on a READ is
+  uncertain, never denied: the adapter could not establish state,
+  and denied means a mutation was refused. A 5xx during
+  confirmation is uncertain, never rejected: rejected means the
+  remote definitively said no. The adapters classify by
+  read-vs-mutation, and the tests pin both cases.
+- **No merge.** The GitHub adapter creates the PR and reads it
+  back; it never merges, and there is no merge command. A human
+  merges. Child-PR auto-merge is not a default — enabling it
+  would be a delivery decision for the maintainer, not something
+  this phase assumes.
+
+What the factory cannot prove: the adapter's report is a claim.
+The core checks the report's shape and its head pinning, and the
+report is stored as evidence — but if an adapter lies about
+having read the remote back, the core cannot tell. The defense is
+that the adapter is small, stdlib-only, and its read-back logic
+is the part the tests exercise against a fake server; and the
+ref (PR URL, Asana permalink) is in the record for a human to
+open.
+
 ## Layout
 
 ```text
@@ -420,7 +478,9 @@ bin/t12                  launcher (resolves the package from its own path)
 t12/
   cli.py                 commands: init/prepare/red/stage/gate/replay/
                          review/green/manifest/status/pause/resume/
-                         escalate/context/verify/probe/report/calibrate
+                         escalate/context/verify/probe/report/calibrate/
+                         deliver
+  delivery.py            delivery outcomes, head pinning, uncertain block
   model.py               phases, transitions, budgets, run record (Factor 5/8/12)
   runner.py              safe subprocess: argv only, timeout, kill group,
                          sanitized env, duration + exit captured
@@ -429,10 +489,13 @@ t12/
   store.py               atomic writes, private perms, symlink rejection
   evidence.py            sha256 refs, re-hash verification, provenance
   gates.py               ordered gate ladder, repair cap
+  limits.py              budget reporting, p90 calibration, limits.json
+  sandbox.py             forbidden flags, credential stripping, Landlock cage, probes
   errors.py
 prompts/                 owned prompts, versioned (Factor 2)
-skills/                  orchestrator, builder, reviewer, qa (super-board roles)
-tests/                   unittest, synthetic git repos, no network, no model
+skills/                  orchestrator, builder, reviewer, qa, security (super-board roles)
+adapters/                delivery adapters (github, asana) + shared HTTP/outcome rules
+tests/                   unittest, synthetic git repos, fake HTTP servers, no network, no model
 scripts/smoke.sh         happy-path smoke on a disposable repo
 examples/                a sample task file
 ```
@@ -510,6 +573,16 @@ examples/                a sample task file
    replay — the state machine now allows green → gates for the
    review loop — and the next review starts from the voided report
    (review remembers, via `t12 context --role reviewer`).
-7. **Delivery** — GitHub/Asana adapters last, merge gate pinned to
-   head SHA, merge outcomes `confirmed / rejected / denied /
-   uncertain`, never a blind retry on uncertain.
+7. **Delivery — DONE 2026-11-11.** The core never talks to the
+   network and holds no credentials: adapters (`adapters/github.py`,
+   `adapters/asana.py`, stdlib-only) do the remote work and write a
+   JSON report, and `t12 deliver` records the report as evidence.
+   Delivery needs a `local-verified` run with an intact chain and
+   HEAD on the candidate, and is pinned to the reviewed head SHA —
+   a report for any other commit is refused. Outcomes are exactly
+   `confirmed` (remote state read back and matching), `rejected`
+   (remote definitively said no), `denied` (mutation refused for
+   permission), `uncertain` (state unknown). An uncertain outcome
+   blocks further delivery for that adapter until an explicit
+   `--resolves` read-back report arrives — never a blind retry.
+   The adapter never merges; a human merges the PR.
