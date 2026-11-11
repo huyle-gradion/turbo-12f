@@ -58,6 +58,10 @@ def events_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.events.jsonl")
 
 
+def verify_checkout_dir(home, task_id):
+    return os.path.join(home, "verify", task_id)
+
+
 def evidence_dir(home, task_id):
     return os.path.join(home, "evidence", task_id)
 
@@ -169,7 +173,7 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
             raise StateError(f"gate {g.get('name')!r} must have a non-empty argv command")
         gates.append(
             {"name": g["name"], "command": list(g["command"]), "status": "pending",
-             "observation": None}
+             "observation": None, "commit": None}
         )
     if not gates:
         raise StateError("task must declare at least one gate")

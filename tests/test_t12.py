@@ -688,6 +688,61 @@ class CliCase(unittest.TestCase):
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "local-verified")
 
+    def stage_without_implementation(self):
+        self.do_red()
+        self.write_worktree("NOTES.md", "# notes\n")
+        self.commit_worktree("chore: no implementation")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+
+    def test_gate_refuses_uncommitted_changes(self):
+        self.stage_without_implementation()
+        self.write_worktree("app.py", APP_V2)
+        result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                          "--name", "unit", "--session", "sess-qa", expect=1)
+        self.assertIn("uncommitted changes", result.stderr)
+
+    def test_gate_refuses_moved_head(self):
+        self.stage_without_implementation()
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: implement after stage")
+        result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                          "--name", "unit", "--session", "sess-qa", expect=1)
+        self.assertIn("HEAD moved since stage", result.stderr)
+
+    def test_replay_refuses_uncommitted_changes(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
+        self.write_worktree("app.py", APP_WRONG)
+        result = self.t12("replay", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("uncommitted changes", result.stderr)
+
+    def test_gate_ignores_files_outside_the_candidate(self):
+        self.do_red()
+        self.write_worktree(".gitignore", "app_fix.py\n")
+        self.write_worktree("app.py", "from app_fix import greet\n")
+        self.commit_worktree("feat: greet from an ignored module")
+        self.write_worktree("app_fix.py", APP_V2)
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                          "--name", "unit", "--session", "sess-qa", expect=1)
+        self.assertIn("gate 'unit' failed", result.stderr)
+
+    def test_green_refuses_gate_bound_to_another_commit(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
+        run_path = os.path.join(self.home, "runs", "demo-1.json")
+        with open(run_path) as fh:
+            run = json.load(fh)
+        run["gates"][0]["commit"] = "0" * 40
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        self.t12("probe", "--home", self.home, "--task-id", "demo-1")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("not run on the candidate", result.stderr)
 
 
 class DockerCase(unittest.TestCase):
@@ -816,11 +871,16 @@ class DockerCase(unittest.TestCase):
         log = self.docker_log()
         runs = [entry for entry in log if entry[:1] == ["run"]]
         self.assertTrue(runs, "no docker run invocations recorded")
+        checkout = os.path.join(self.home, "verify", "demo-docker")
         for entry in runs:
             self.assertIn("--network", entry)
             self.assertEqual(entry[entry.index("--network") + 1], "none")
-            self.assertIn(f"{wt}:{wt}:rw", entry)
+            self.assertTrue(f"{wt}:{wt}:rw" in entry or f"{checkout}:{checkout}:rw" in entry,
+                            f"unexpected mounts: {entry}")
             self.assertIn("python:3.12-slim", entry)
+        self.assertTrue(any(f"{checkout}:{checkout}:rw" in entry for entry in runs),
+                        "gate and replay did not run in the candidate checkout")
+        self.assertFalse(os.path.exists(checkout), "candidate checkout was not removed")
         flat = " ".join(" ".join(entry) for entry in log)
         self.assertNotIn("canary-secret-value", flat)
 

@@ -11,14 +11,19 @@ enforces; this file states what it does *not* claim.
 - **Candidate**: the commit `stage` pinned. A new commit is a new
   candidate; verification bound to the old one does not carry over.
 - **Gate**: one ordered check from the task file. A later gate cannot
-  run until the prior gate passed on the same candidate.
+  run until the prior gate passed on the same candidate. Gates and
+  replay refuse a dirty worktree or a moved HEAD, then run in a fresh
+  checkout of the candidate commit (`verify/<id>`, removed after), so
+  ignored or untracked files in the builder's worktree cannot affect
+  them. Each gate records the commit it ran on.
 - **local-verified**: the configured evidence chain was observed and
   remains internally consistent. Not QC approval, not product
   acceptance, not permission to merge.
 - **Worker**: an LLM invocation for one role on one task. The worker
   is replaceable; the policy/evidence engine is the durable part.
 - **Host adapter**: code that calls a model, a tracker, or a forge.
-  None exists in Phase 1. The core never imports one.
+  Adapters live in `adapters/` and report back through `t12 deliver`;
+  the core never imports one.
 
 ## What this does not claim
 
@@ -29,4 +34,11 @@ enforces; this file states what it does *not* claim.
 - A same-user process can forge local files. This is a honesty and
   reproducibility layer, not a security boundary against a malicious
   local actor.
+- Candidate binding holds against accidents (uncommitted, ignored,
+  or later-written files in the builder's worktree), not against a
+  builder that tampers on purpose. The builder runs unsandboxed as
+  the operator, so it can plant a hook, `git replace` ref, or smudge
+  filter in the shared `.git`, or a `.pth` file in the verify home,
+  and make a gate pass on a broken candidate. Closing that needs the
+  builder itself caged away from `.git` and the state home.
 - No network, no credentials, no model calls in the core or tests.

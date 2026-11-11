@@ -2,6 +2,7 @@
 worker's claim about which commit was tested or reviewed.
 """
 
+import contextlib
 import os
 import shutil
 
@@ -92,6 +93,19 @@ def remove_worktree_force(repo, worktree_path):
     git(repo, "worktree", "prune")
     if os.path.isdir(worktree_path):
         shutil.rmtree(worktree_path)
+
+
+@contextlib.contextmanager
+def detached_checkout(repo, path, commit):
+    """A fresh checkout of exactly `commit`, removed on exit. Nothing
+    untracked, ignored, or written later in the builder's worktree is
+    visible inside it."""
+    remove_worktree_force(repo, path)
+    git_ok(repo, "worktree", "add", "--detach", str(path), commit)
+    try:
+        yield path
+    finally:
+        remove_worktree_force(repo, path)
 
 
 def delete_branch(repo, branch):

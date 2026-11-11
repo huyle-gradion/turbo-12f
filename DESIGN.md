@@ -99,16 +99,16 @@ consolidation rule above.
 
 | # | Factor | Implementation in turbo-12f |
 |---|---|---|
-| 1 | Natural language to tool calls | The LLM's only job is to turn an owned prompt + context into a structured result: file edits in the worktree, or a JSON tool call (`escalate`, `done`). It never runs commands, never merges, never decides the phase. `prompts/*.md`, `t12/model.py` (result schema). |
+| 1 | Natural language to tool calls | The LLM turns an owned prompt + context into file edits in the worktree or one CLI step (`red`, `stage`, `review`, `escalate`, ...). It never merges and never decides the phase: the CLI refuses any step the state machine does not allow. `prompts/*.md`, `t12/model.py` (transitions). **Not yet built:** no code parses or validates a worker's own output; the worker or orchestrator acts only by running the CLI. |
 | 2 | Own your prompts | Prompts are versioned files under `prompts/`, not strings hidden in a framework or in code. Changing a prompt is a reviewed change to a file. |
 | 3 | Own your context window | `t12 context` builds the worker's context deterministically from the run record: task, ACs, phase, budgets left, changed files, last compacted error. Nothing else is smuggled in. |
-| 4 | Tools are just structured outputs | Worker outputs are validated JSON against a schema (`tool`, `args`). Free text is never parsed as an instruction. A malformed result is a failed step, not a guess. |
+| 4 | Tools are just structured outputs | Each tool is a CLI command with typed arguments (argparse); a step that does not fit the phase, session, or evidence is refused, never guessed at. **Not yet built:** a JSON result schema (`tool`, `args`) for worker outputs. |
 | 5 | Unify execution state and business state | One run record per task holds both: phase, budgets, gates, evidence refs (execution) and task, ACs, candidate commit (business). Plus an append-only `events.jsonl`. State is derived by folding the record, never from a second store. |
 | 6 | Launch / Pause / Resume with simple APIs | `prepare`, `pause`, `resume`, `status` are plain CLI commands. Resume re-validates the run from disk (HEAD, test blob, evidence hashes) before continuing; drift fails closed. |
-| 7 | Contact humans with tool calls | `escalate --question ...` is a tool call the worker (or operator) makes. It records the question, pauses the run, and waits. The factory never auto-answers a human question. |
+| 7 | Contact humans with tool calls | `escalate --question ...` is a tool call the worker (or operator) makes. It records the question, pauses the run, and waits. The factory never auto-answers a human question. **Not yet built:** recording the human's answer and passing it to the next `t12 context`. |
 | 8 | Own your control flow | The state machine in `t12/model.py` is the only control flow. Transitions are enumerated; an invalid transition is an error, not a prompt decision. |
 | 9 | Compact errors into context window | Raw failure output lives in evidence; the next worker context gets a compacted summary (last ~40 lines + exit code + which gate). The full log is never pasted into a prompt. |
-| 10 | Small, focused agents | One worker = one task = one role (builder, test-writer, reviewer, QA). Each role has its own prompt, its own input contract, and no access to another role's worktree. |
+| 10 | Small, focused agents | One worker = one task = one role (builder, test-writer, reviewer, QA). Each role has its own prompt and its own session id, and a session serves one role per run. All roles share the run's one worktree, so separation is by session, not by filesystem. |
 | 11 | Trigger from anywhere, meet users where they are | Entry points are a CLI and a plain JSON task file. No server, no dashboard needed to launch. A chat message, a cron job, or a terminal can all produce the same task file and run the same commands. |
 | 12 | Make your agent a stateless reducer | Each CLI invocation is `f(state on disk, event) -> new state on disk`. Nothing lives only in a process's memory between steps. Any step can be replayed from the run record + event log. |
 
