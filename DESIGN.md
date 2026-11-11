@@ -155,6 +155,50 @@ permissions.
   goes to a human with a named unblock step. The run pauses; it does
   not guess.
 
+## TypeScript and UI work: anti-slop
+
+Source: https://github.com/miqdadbadjuber/anti-slop (MIT).
+Michael's pointer: Dex Horthy's 12-factor-agents talks frame the same
+problem as a "war on slop" — unattended agents ship generic UI, hype
+copy, and AI-shaped code, and slop compounds because agents imitate
+the repo's existing patterns. (Verified: the repo is real, ~8.9k
+stars, v3.2.28; what I could not verify from the 12-factor README is
+that Dex name-checked this specific repo — recording it as Michael's
+pointer, not as a Dex citation.)
+
+- **What it is:** a filter, not a style guide. 40 mandatory rules
+  (R-01–R-40) in three tiers, a Liveliness Toolkit, and a Delivery
+  Gate — a mandatory PASS/FAIL report before anything ships. Six
+  skills, load only what the task needs: `antislop` (core, always),
+  `antislop-ui`, `antislop-copywriting`, `antislop-human`
+  (accessibility), `antislop-layoutmobile`, `antislop-code`.
+- **When it applies:** any task whose deliverable is TypeScript code
+  or UI — which is the likely shape of product work here (TypeScript
+  on Node, React + TypeScript with Vite+ for UI/tests, Tauri 2
+  shell). The Python core of turbo-12f itself does not need it; the
+  factory's product work does.
+- **How it runs:** two modes — `during` (rules guide the build, the
+  session closes with the Delivery Gate report) and `after` (audit
+  existing work, numbered findings, fix what the human approves).
+  Default for factory work is `during`.
+- **The direction rule (matters):** anti-slop removes slop and stops
+  there; visual direction comes from a per-product UI direction file
+  (also called `DESIGN.md` in that repo). Without it, UI output is
+  labelled a draft without direction. That file is **not**
+  turbo-12f's `DESIGN.md` — same name, different file, different
+  job. The direction file belongs to the product repo and the task
+  contract (Factor 2: own your prompts; the task supplies direction,
+  the worker does not invent it).
+- **Not vendored:** turbo-12f does not copy the skill in. The worker
+  loads it per task: `npx antislop-ai` (installer),
+  `npx skills add miqdadbadjuber/anti-slop`,
+  `agy plugin install https://github.com/miqdadbadjuber/anti-slop`,
+  or the single `antislop.md` file. Pin a version when adopting;
+  the repo does not update itself.
+- **Reviewer check:** the reviewer verifies the Delivery Gate report
+  exists and passed. A missing or failing gate is a Verification
+  miss; the run is unverified until it passes.
+
 ## Layout
 
 ```text

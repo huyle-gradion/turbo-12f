@@ -37,3 +37,10 @@ return instead:
   green test run on your machine is a claim, not evidence.
 - Never claim a gate passed without the factory running it.
 - Never touch files outside the worktree.
+
+## TypeScript / UI work
+
+Apply the anti-slop filter (`antislop` core + `antislop-ui` for
+visual work). Follow its 40 rules and finish with its Delivery Gate
+PASS/FAIL report. If the product supplies no UI direction file, mark
+the UI a draft and escalate rather than inventing direction.

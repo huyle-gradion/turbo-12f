@@ -16,6 +16,16 @@ your context comes from `t12 context --role builder`.
 - Return a structured result (`implementation_ready` or `escalate`).
   Free text is not an instruction to the factory.
 
+## TypeScript / UI work
+
+Load the anti-slop skill before building — core `antislop` always,
+plus `antislop-ui` for visual work (and copywriting / human /
+layoutmobile as the task needs). Work in `during` mode and close
+with the Delivery Gate PASS/FAIL report. If the product has no UI
+direction file, say so and mark the UI a draft — do not invent
+direction. See `DESIGN.md` ("TypeScript and UI work: anti-slop");
+note the direction file is not turbo-12f's `DESIGN.md`.
+
 ## Done
 
 You are done when the change is committed in the worktree and you

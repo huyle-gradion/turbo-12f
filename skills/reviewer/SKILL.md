@@ -36,7 +36,8 @@ route fixes to Builder (code) or QA (tests).
 4. **Verify evidence yourself.** Re-run the exact recorded test
    command in the worktree. Green continues; red bounces to QA with
    the failure quoted. For background/upload flows, verify terminal
-   state and saved records, not a 200.
+   state and saved records, not a 200. For TypeScript/UI work, also
+   verify the anti-slop Delivery Gate report exists and passed.
 5. **Route fixes.** `[builder]` for code, `[qa]` for tests, human
    for human gates. Deepening opportunities (shallow module, seam in
    the wrong place, behaviour spread across call sites) become future
