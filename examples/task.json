@@ -1,0 +1,1 @@
+{"acceptance_criteria":["greet('Ana') returns 'Hello, Ana!'","greet() with no argument returns 'Hello, world!'"],"base":"main","gates":[{"command":["python3","-m","unittest","discover","-s","tests","-q"],"name":"unit"}],"id":"demo-1","op_limit":50,"repair_cap":2,"time_limit_s":600,"title":"Add a greet() function that returns a greeting"}

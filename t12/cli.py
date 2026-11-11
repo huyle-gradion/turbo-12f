@@ -1,0 +1,576 @@
+"""turbo-12f CLI. Each command is one deterministic step: load the run
+record from disk, validate, act, persist atomically. The LLM never
+runs here; `context` prints the owned prompt + minimal context for
+the operator to feed to a model, and the other commands verify what
+the worker did in the worktree.
+"""
+
+import argparse
+import json
+import os
+import re
+import shlex
+import sys
+import time
+
+from . import evidence, gates as gate_mod, gitio, model, runner, store
+from .errors import StateError, T12Error
+
+VERSION = "0.1.0"
+ROLES = ("test-writer", "builder", "reviewer", "qa")
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+# ---------------------------------------------------------------- helpers
+
+def _home(args):
+    return os.path.abspath(args.home)
+
+
+def _config(home):
+    path = os.path.join(home, "config.json")
+    if not os.path.exists(path):
+        raise StateError(f"no turbo-12f state home at {home}; run `init` first")
+    return store.load_json(path)
+
+
+def _run(home, task_id):
+    return model.load_run(home, task_id)
+
+
+def _save(home, run, event_type, detail=None):
+    model.save_run(home, run)
+    model.append_event(home, run, event_type, detail)
+
+
+def _check_worktree(run):
+    wt = run["worktree"]
+    if not gitio.is_git_repo(wt):
+        raise StateError(f"worktree missing or not a git repo: {wt}")
+    if gitio.current_branch(wt) != run["branch"]:
+        raise StateError(
+            f"worktree is on {gitio.current_branch(wt)!r}, expected {run['branch']!r}"
+        )
+    return wt
+
+
+def _time_left(run):
+    left = int(model.time_left_s(run))
+    if left <= 0:
+        raise StateError("time budget exhausted")
+    return left
+
+
+def _last_compacted_error(home, run):
+    """Factor 9: the next worker gets a compacted error, not raw logs."""
+    path = model.events_path(home, run["task_id"])
+    if not os.path.exists(path):
+        return None
+    last = None
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") in ("gate-failed", "replay-failed", "red-failed"):
+                last = event
+    if not last:
+        return None
+    detail = last.get("detail", {})
+    output = detail.get("output", "")
+    lines = output.splitlines()[-40:]
+    return {
+        "event": last["type"],
+        "step": detail.get("step"),
+        "exit_code": detail.get("exit_code"),
+        "output_tail": lines,
+    }
+
+
+def _manifest_text(run):
+    lines = [
+        f"turbo-12f manifest — task {run['task_id']}: {run['title']}",
+        f"phase: {run['phase']}",
+        f"repo: {run['repo']}",
+        f"base: {run['base']}  branch: {run['branch']}",
+        f"config_digest: {run['config_digest']}",
+        "",
+        "Acceptance criteria:",
+    ]
+    for criterion in run["acceptance_criteria"]:
+        lines.append(f"  - {criterion}")
+    lines.append("")
+    if run["red"]:
+        r = run["red"]
+        lines += [
+            f"red commit: {r['commit']}  test: {r['test_path']}  blob: {r['test_blob'][:12]}",
+            f"red command: {' '.join(r['command'])}  exit={r['exit_code']}",
+            f"red output: {r['output']['name']} sha256={r['output']['sha256'][:16]}",
+            "",
+        ]
+    if run["candidate"]:
+        lines.append(f"candidate commit: {run['candidate']['commit']}")
+        lines.append("")
+    lines.append("Gates:")
+    for gate in run["gates"]:
+        obs = gate["observation"]
+        extra = ""
+        if obs:
+            extra = f" exit={obs['observation']['exit_code']} sha256={obs['sha256'][:16]}"
+        lines.append(f"  - {gate['name']}: {gate['status']}{extra}")
+    lines.append("")
+    if run["replay"]:
+        rp = run["replay"]
+        lines += [
+            f"replay: exit={rp['exit_code']} on {rp['commit'][:12]}",
+            f"replay output: {rp['output']['name']} sha256={rp['output']['sha256'][:16]}",
+            "",
+        ]
+    b = run["budgets"]
+    lines.append(
+        f"budgets: time {b['time_limit_s']}s, ops {b['ops_used']}/{b['op_limit']}, "
+        f"repairs {b['repairs_used']}/{b['repair_cap']}"
+    )
+    if run["stop_reason"]:
+        lines.append(f"stop reason: {run['stop_reason']}")
+    lines.append("")
+    lines.append(
+        "local-verified means the configured evidence chain was observed "
+        "and is internally consistent. It is not acceptance and not "
+        "permission to merge."
+    )
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------- commands
+
+def cmd_init(args):
+    repo = os.path.abspath(args.repo)
+    home = os.path.abspath(args.home)
+    if not gitio.is_git_repo(repo):
+        raise StateError(f"not a git repository: {repo}")
+    if os.path.commonpath([home, repo]) in (home, repo):
+        raise StateError("state home must live outside the product repo")
+    for sub in ("", "runs", "evidence", "worktrees"):
+        store.mkdir_private(os.path.join(home, sub))
+    config_path = os.path.join(home, "config.json")
+    config = {"version": model.VERSION, "repo": repo, "created_at": time.time()}
+    if os.path.exists(config_path):
+        existing = store.load_json(config_path)
+        if existing.get("repo") != repo:
+            raise StateError(
+                f"state home already bound to {existing.get('repo')}, not {repo}"
+            )
+    store.save_json(config_path, config)
+    print(f"init: repo={repo} home={home}")
+    return 0
+
+
+def cmd_prepare(args):
+    home = _home(args)
+    config = _config(home)
+    task = store.load_json(args.task)
+    task_id = task.get("id", "")
+    if not TASK_ID_RE.match(task_id):
+        raise StateError(f"task id must match {TASK_ID_RE.pattern}: {task_id!r}")
+    if os.path.exists(model.run_path(home, task_id)):
+        raise StateError(f"run already exists for task {task_id!r}; refusing to overwrite")
+    repo = config["repo"]
+    if not gitio.is_clean(repo):
+        raise StateError(f"product repo has uncommitted changes: {repo}")
+    base = task.get("base", "main")
+    gitio.rev_parse(repo, base)
+    run = model.new_run(task, repo, home)
+    if gitio.branch_exists(repo, run["branch"]):
+        raise StateError(f"branch already exists: {run['branch']}")
+    gitio.add_worktree(repo, run["worktree"], run["branch"], base)
+    model.transition(run, "ready")
+    _save(home, run, "prepared", {"branch": run["branch"], "base": base})
+    print(f"ready: task={task_id} worktree={run['worktree']} branch={run['branch']}")
+    return 0
+
+
+def cmd_context(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if args.role not in ROLES:
+        raise StateError(f"unknown role {args.role!r}; roles are {list(ROLES)}")
+    prompt_path = os.path.join(PROJECT_ROOT, "prompts", f"{args.role}.md")
+    if not os.path.exists(prompt_path):
+        raise StateError(f"owned prompt missing: {prompt_path}")
+    with open(prompt_path, encoding="utf-8") as fh:
+        prompt = fh.read()
+    wt = run["worktree"]
+    changed = gitio.dirty_paths(wt) if os.path.isdir(wt) else []
+    context = {
+        "task_id": run["task_id"],
+        "title": run["title"],
+        "acceptance_criteria": run["acceptance_criteria"],
+        "phase": run["phase"],
+        "requested_phase": args.phase,
+        "branch": run["branch"],
+        "worktree": wt,
+        "base": run["base"],
+        "budgets": {
+            "time_left_s": int(model.time_left_s(run)),
+            "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
+            "repairs_left": run["budgets"]["repair_cap"] - run["budgets"]["repairs_used"],
+        },
+        "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
+        "changed_files": changed,
+        "last_compacted_error": _last_compacted_error(home, run),
+    }
+    print(prompt)
+    print("--- context (JSON) ---")
+    print(json.dumps(context, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_red(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] != "ready":
+        raise StateError(f"red requires phase 'ready', run is {run['phase']!r}")
+    model.check_budgets(run)
+    wt = _check_worktree(run)
+    test_path = args.test_path
+    if not os.path.exists(os.path.join(wt, test_path)):
+        raise StateError(f"test file not found in worktree: {test_path}")
+    dirty = set(gitio.dirty_paths(wt))
+    if dirty - {test_path}:
+        raise StateError(f"refusing red: unrelated dirty files: {sorted(dirty - {test_path})}")
+    try:
+        command = shlex.split(args.command)
+    except ValueError as exc:
+        raise StateError(f"cannot parse --command: {exc}") from exc
+    if not command:
+        raise StateError("--command must not be empty")
+    obs = runner.run(command, cwd=wt, timeout_s=_time_left(run))
+    if obs["timed_out"] or obs["exit_code"] == 0:
+        _save(home, run, "red-failed", {
+            "step": "red", "exit_code": obs["exit_code"],
+            "output": (obs["stdout"] + obs["stderr"])[-4000:],
+        })
+        raise StateError(
+            "red test did not fail as required "
+            f"(exit={obs['exit_code']}, timed_out={obs['timed_out']}); "
+            "a passing test cannot be the red test"
+        )
+    combined = obs["stdout"] + obs["stderr"]
+    if args.marker not in combined:
+        _save(home, run, "red-failed", {
+            "step": "red", "exit_code": obs["exit_code"],
+            "output": combined[-4000:],
+        })
+        raise StateError(f"red output lacks the expected failure marker: {args.marker!r}")
+    ref = evidence.write_observation(home, run["task_id"], "red-output.txt", obs)
+    commit = gitio.commit_file(wt, test_path, f"test({run['task_id']}): red test")
+    run["red"] = {
+        "test_path": test_path,
+        "command": command,
+        "marker": args.marker,
+        "exit_code": obs["exit_code"],
+        "output": ref,
+        "test_blob": gitio.blob_hash(wt, test_path),
+        "commit": commit,
+    }
+    model.bump_op(run)
+    model.transition(run, "red")
+    _save(home, run, "red", {"commit": commit, "test_path": test_path})
+    print(f"red: commit={commit[:12]} test={test_path}")
+    return 0
+
+
+def cmd_stage(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] not in ("red", "gates"):
+        raise StateError(f"stage requires phase 'red' or 'gates', run is {run['phase']!r}")
+    model.check_budgets(run)
+    wt = _check_worktree(run)
+    if not gitio.is_clean(wt):
+        raise StateError("refusing stage: worktree has uncommitted changes")
+    candidate = gitio.head(wt)
+    if candidate == run["red"]["commit"]:
+        raise StateError("refusing stage: no implementation commit after the red commit")
+    if not gitio.is_ancestor(wt, run["red"]["commit"], candidate):
+        raise StateError("refusing stage: candidate does not descend from the red commit")
+    if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
+        raise StateError("refusing stage: red test file changed after the red phase")
+    if run["phase"] == "gates":
+        gate_mod.reset_for_new_candidate(run)
+    run["candidate"] = {"commit": candidate, "staged_at": time.time()}
+    model.bump_op(run)
+    model.transition(run, "gates")
+    _save(home, run, "staged", {"commit": candidate})
+    print(f"staged: candidate={candidate[:12]}")
+    return 0
+
+
+def cmd_gate(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] != "gates":
+        raise StateError(f"gate requires phase 'gates', run is {run['phase']!r}")
+    model.check_budgets(run)
+    wt = _check_worktree(run)
+    gate = gate_mod.find_gate(run, args.name)
+    gate_mod.check_order(run, gate)
+    obs = runner.run(gate["command"], cwd=wt, timeout_s=_time_left(run))
+    ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
+    model.bump_op(run)
+    if obs["timed_out"] or obs["exit_code"] != 0:
+        gate["status"] = "failed"
+        gate["observation"] = ref
+        run["budgets"]["repairs_used"] += 1
+        _save(home, run, "gate-failed", {
+            "step": gate["name"], "exit_code": obs["exit_code"],
+            "output": (obs["stdout"] + obs["stderr"])[-4000:],
+        })
+        if run["budgets"]["repairs_used"] > run["budgets"]["repair_cap"]:
+            run["phase"] = "stopped"
+            run["stop_reason"] = "repair-cap"
+            _save(home, run, "stopped", {"reason": "repair-cap"})
+            raise StateError(
+                f"gate {gate['name']!r} failed and the repair cap "
+                f"({run['budgets']['repair_cap']}) is exceeded; run stopped"
+            )
+        raise StateError(
+            f"gate {gate['name']!r} failed (exit={obs['exit_code']}); "
+            f"repairs used {run['budgets']['repairs_used']}/{run['budgets']['repair_cap']} — "
+            "fix in the worktree and re-stage"
+        )
+    gate["status"] = "passed"
+    gate["observation"] = ref
+    _save(home, run, "gate-passed", {"gate": gate["name"]})
+    if gate_mod.all_passed(run):
+        print(f"gate {gate['name']}: passed — all gates passed, run replay next")
+    else:
+        nxt = gate_mod.next_gate(run)
+        print(f"gate {gate['name']}: passed — next gate: {nxt['name']}")
+    return 0
+
+
+def cmd_replay(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] != "gates":
+        raise StateError(f"replay requires phase 'gates', run is {run['phase']!r}")
+    if not gate_mod.all_passed(run):
+        raise StateError("replay requires all gates to pass first")
+    model.check_budgets(run)
+    wt = _check_worktree(run)
+    if gitio.head(wt) != run["candidate"]["commit"]:
+        raise StateError("refusing replay: HEAD moved since stage")
+    obs = runner.run(run["red"]["command"], cwd=wt, timeout_s=_time_left(run))
+    model.bump_op(run)
+    if obs["timed_out"] or obs["exit_code"] != 0:
+        _save(home, run, "replay-failed", {
+            "step": "replay", "exit_code": obs["exit_code"],
+            "output": (obs["stdout"] + obs["stderr"])[-4000:],
+        })
+        raise StateError(
+            f"replay failed (exit={obs['exit_code']}): the red test does not "
+            "pass on the candidate — fix in the worktree and re-stage"
+        )
+    ref = evidence.write_observation(home, run["task_id"], "replay-output.txt", obs)
+    run["replay"] = {
+        "command": run["red"]["command"],
+        "exit_code": obs["exit_code"],
+        "output": ref,
+        "commit": run["candidate"]["commit"],
+    }
+    model.transition(run, "green")
+    _save(home, run, "replayed", {"commit": run["candidate"]["commit"]})
+    print(f"replay: passed on {run['candidate']['commit'][:12]} — run green next")
+    return 0
+
+
+def cmd_green(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] != "green":
+        raise StateError(f"green requires phase 'green', run is {run['phase']!r}")
+    model.check_budgets(run)
+    wt = _check_worktree(run)
+    if not gitio.is_clean(wt):
+        raise StateError("refusing green: worktree has uncommitted changes")
+    if gitio.head(wt) != run["candidate"]["commit"]:
+        raise StateError("refusing green: HEAD moved since stage")
+    if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
+        raise StateError("refusing green: red test file changed after the red phase")
+    evidence.verify_green(home, run)
+    model.bump_op(run)
+    model.transition(run, "local-verified")
+    manifest = _manifest_text(run)
+    ref = evidence.write_evidence(home, run["task_id"], "manifest.txt", manifest.encode())
+    run["manifest"] = ref
+    _save(home, run, "verified", {"manifest_sha256": ref["sha256"]})
+    print(f"local-verified: task={run['task_id']} candidate={run['candidate']['commit'][:12]}")
+    return 0
+
+
+def cmd_manifest(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] not in ("green", "local-verified"):
+        raise StateError(
+            f"manifest requires phase 'green' or 'local-verified', run is {run['phase']!r}"
+        )
+    text = _manifest_text(run)
+    if args.out:
+        store.atomic_write(os.path.abspath(args.out), text.encode())
+        print(f"manifest written to {args.out}")
+    else:
+        ref = evidence.write_evidence(home, run["task_id"], "manifest.txt", text.encode())
+        print(f"manifest written: sha256={ref['sha256'][:16]}")
+    return 0
+
+
+def cmd_status(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    print(json.dumps({
+        "task_id": run["task_id"],
+        "title": run["title"],
+        "phase": run["phase"],
+        "branch": run["branch"],
+        "worktree": run["worktree"],
+        "red_commit": run["red"]["commit"] if run["red"] else None,
+        "candidate": run["candidate"]["commit"] if run["candidate"] else None,
+        "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
+        "budgets": {
+            "time_left_s": int(model.time_left_s(run)),
+            "ops_used": run["budgets"]["ops_used"],
+            "op_limit": run["budgets"]["op_limit"],
+            "repairs_used": run["budgets"]["repairs_used"],
+            "repair_cap": run["budgets"]["repair_cap"],
+        },
+        "stop_reason": run["stop_reason"],
+    }, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_pause(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] in ("local-verified", "stopped", "paused"):
+        raise StateError(f"cannot pause from phase {run['phase']!r}")
+    run["prior_phase"] = run["phase"]
+    model.transition(run, "paused")
+    _save(home, run, "paused", {"reason": args.reason, "prior_phase": run["prior_phase"]})
+    print(f"paused: task={run['task_id']} (was {run['prior_phase']}) — {args.reason}")
+    return 0
+
+
+def cmd_resume(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] != "paused":
+        raise StateError(f"resume requires phase 'paused', run is {run['phase']!r}")
+    prior = run["prior_phase"]
+    wt = _check_worktree(run)
+    repo = _config(home)["repo"]
+    expected = None
+    if prior == "ready":
+        expected = gitio.rev_parse(repo, run["base"])
+    elif prior == "red":
+        expected = run["red"]["commit"]
+    elif prior in ("gates", "green"):
+        expected = run["candidate"]["commit"]
+    if expected is not None and gitio.head(wt) != expected:
+        raise StateError(
+            f"refusing resume: HEAD moved while paused "
+            f"(expected {expected[:12]}, found {gitio.head(wt)[:12]})"
+        )
+    if run["red"] and gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
+        raise StateError("refusing resume: red test file changed while paused")
+    model.transition(run, prior)
+    run["prior_phase"] = None
+    _save(home, run, "resumed", {"phase": prior})
+    print(f"resumed: task={run['task_id']} phase={prior}")
+    return 0
+
+
+def cmd_escalate(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    if run["phase"] in ("local-verified", "stopped", "paused"):
+        raise StateError(f"cannot escalate from phase {run['phase']!r}")
+    run["prior_phase"] = run["phase"]
+    run["escalation"] = {"question": args.question, "ts": time.time()}
+    model.transition(run, "paused")
+    _save(home, run, "human-contact", {"question": args.question})
+    print(f"escalated to human (run paused): {args.question}")
+    return 0
+
+
+# ---------------------------------------------------------------- entry
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="t12", description="turbo-12f evidence runner")
+    parser.add_argument("--version", action="version", version=f"t12 {VERSION}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("init"); p.add_argument("--repo", required=True); p.add_argument("--home", required=True)
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("prepare"); p.add_argument("--home", required=True); p.add_argument("--task", required=True)
+    p.set_defaults(func=cmd_prepare)
+
+    p = sub.add_parser("context"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--role", required=True); p.add_argument("--phase", required=True)
+    p.set_defaults(func=cmd_context)
+
+    p = sub.add_parser("red"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--test-path", required=True); p.add_argument("--command", required=True)
+    p.add_argument("--marker", required=True)
+    p.set_defaults(func=cmd_red)
+
+    p = sub.add_parser("stage"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_stage)
+
+    p = sub.add_parser("gate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--name", required=True)
+    p.set_defaults(func=cmd_gate)
+
+    p = sub.add_parser("replay"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("green"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_green)
+
+    p = sub.add_parser("manifest"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--out")
+    p.set_defaults(func=cmd_manifest)
+
+    p = sub.add_parser("status"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("pause"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_pause)
+
+    p = sub.add_parser("resume"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_resume)
+
+    p = sub.add_parser("escalate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--question", required=True)
+    p.set_defaults(func=cmd_escalate)
+
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except T12Error as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

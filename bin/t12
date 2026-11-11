@@ -1,0 +1,5 @@
+#!/bin/sh
+# turbo-12f launcher: resolves the package from its own location.
+set -e
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m t12 "$@"
