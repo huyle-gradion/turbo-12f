@@ -1027,6 +1027,9 @@ class CliCase(unittest.TestCase):
         try:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.assertTrue(self.board()["demo-1"]["busy"])
+            result = self.t12("stop", "--home", self.home, "--task-id", "demo-1",
+                              "--reason", "x", expect=1)
+            self.assertIn("is busy", result.stderr)
         finally:
             os.close(lock)
         text = self.t12("board", "--home", self.home).stdout

@@ -62,6 +62,11 @@ def events_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.events.jsonl")
 
 
+# Long enough to outlast `board` probing the lock, short enough that a
+# command queued behind a running gate still fails fast.
+LOCK_WAIT_S = 2.0
+
+
 def lock_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.lock")
 
@@ -91,12 +96,17 @@ def run_lock(home, task_id):
     if not os.path.isdir(os.path.dirname(path)):
         raise StateError(f"no turbo-12f state home at {home}; run `init` first")
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + LOCK_WAIT_S
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise StateError(f"run {task_id!r} is busy: another t12 command holds "
-                             f"{path}; retry when it finishes") from None
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateError(f"run {task_id!r} is busy: another t12 command holds "
+                                     f"{path}; retry when it finishes") from None
+                time.sleep(0.05)
         yield
     finally:
         os.close(fd)
