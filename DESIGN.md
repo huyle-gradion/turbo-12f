@@ -267,11 +267,13 @@ Enforced by the core, deterministically:
   missing, so there are no implicit pulls mid-run. The adapter is
   chosen at admission and recorded on the run; every verification
   command and every probe uses that adapter, and the manifest lists
-  it with the image. Added 2026-11-11; tested here against a fake
-  `docker` stub (`tests/fake_docker.py`) because this machine has
-  no Docker — the stub emulates the daemon and stands in for the
-  container's confinement with a Landlock cage. Real end-to-end
-  verification needs a machine with Docker installed.
+  it with the image. Added 2026-11-11. Tested two ways: against a
+  fake `docker` stub (`tests/fake_docker.py`), which emulates the
+  daemon and stands in for the container's confinement with a
+  Landlock cage, and end to end against the real daemon
+  (`RealDockerCase`, which runs when Docker answers and `python:3.12`
+  is present). The real run reaches `local-verified` with both probes
+  passing, and the worktree stays owned by the host user.
 
 Measured, not asserted — the probes:
 
@@ -503,6 +505,7 @@ open.
 bin/t12                  launcher (resolves the package from its own path)
 bin/t12-container        same CLI inside docker run: no network, read-only root,
                          paths mounted at their host locations
+container/Dockerfile     default t12-container image: python:3.12 + pytest
 t12/
   cli.py                 commands: init/prepare/red/stage/gate/replay/
                          review/green/manifest/status/pause/resume/

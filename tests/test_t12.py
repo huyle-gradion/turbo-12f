@@ -979,11 +979,8 @@ class CliCase(unittest.TestCase):
         self.assertIn("no open question", result.stderr)
 
 
-class DockerCase(unittest.TestCase):
-    """Docker adapter end-to-end against the fake docker stub. The
-    stub emulates the daemon (and stands in for the container's
-    confinement with a Landlock cage); real Docker verification
-    happens on a machine with Docker installed."""
+class DockerFlow(unittest.TestCase):
+    """A product repo and the commands that drive a docker-adapter run."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -998,20 +995,7 @@ class DockerCase(unittest.TestCase):
         open(os.path.join(self.repo, "tests", "__init__.py"), "w").close()
         self._git(self.repo, "add", ".")
         self._git(self.repo, "commit", "-qm", "init")
-        bindir = os.path.join(self.tmp.name, "bin")
-        os.makedirs(bindir)
-        stub = os.path.join(bindir, "docker")
-        with open(os.path.join(os.path.dirname(__file__), "fake_docker.py"), "rb") as src:
-            with open(stub, "wb") as dst:
-                dst.write(src.read())
-        os.chmod(stub, 0o755)
-        self.log_path = os.path.join(self.tmp.name, "docker.log")
-        self.docker_env = {
-            "PATH": bindir + ":" + os.environ["PATH"],
-            "FAKE_DOCKER_ROOT": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "FAKE_DOCKER_LOG": self.log_path,
-            "GITHUB_TOKEN": "canary-secret-value",
-        }
+        self.docker_env = {"GITHUB_TOKEN": "canary-secret-value"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1037,12 +1021,6 @@ class DockerCase(unittest.TestCase):
         self.assertEqual(result.returncode, expect,
                          f"t12 {' '.join(args)} -> {result.returncode}: {result.stdout} {result.stderr}")
         return result
-
-    def docker_log(self):
-        if not os.path.exists(self.log_path):
-            return []
-        with open(self.log_path) as fh:
-            return [json.loads(line) for line in fh if line.strip()]
 
     def prepare_task(self, task_id, image=None, extra_env=None):
         task = task_dict(task_id=task_id)
@@ -1082,6 +1060,34 @@ class DockerCase(unittest.TestCase):
                   "--verdict", "approve", "--report", report)
         self.dt12("green", "--home", self.home, "--task-id", task_id)
         self.dt12("manifest", "--home", self.home, "--task-id", task_id)
+
+
+class DockerCase(DockerFlow):
+    """Docker adapter end-to-end against the fake docker stub, for
+    machines without Docker. The stub emulates the daemon and stands
+    in for the container's confinement with a Landlock cage."""
+
+    def setUp(self):
+        super().setUp()
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(bindir)
+        stub = os.path.join(bindir, "docker")
+        with open(os.path.join(os.path.dirname(__file__), "fake_docker.py"), "rb") as src:
+            with open(stub, "wb") as dst:
+                dst.write(src.read())
+        os.chmod(stub, 0o755)
+        self.log_path = os.path.join(self.tmp.name, "docker.log")
+        self.docker_env.update({
+            "PATH": bindir + ":" + os.environ["PATH"],
+            "FAKE_DOCKER_ROOT": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "FAKE_DOCKER_LOG": self.log_path,
+        })
+
+    def docker_log(self):
+        if not os.path.exists(self.log_path):
+            return []
+        with open(self.log_path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
 
     def test_docker_end_to_end(self):
         if not sandbox.landlock_available():
@@ -1148,6 +1154,30 @@ class DockerCase(unittest.TestCase):
                            expect=1,
                            extra_env={"FAKE_DOCKER_IMAGE_MISSING": "missing:latest"})
         self.assertIn("not present locally", result.stderr)
+
+
+REAL_DOCKER_IMAGE = "python:3.12"
+
+
+@unittest.skipUnless(sandbox.docker_available() and sandbox.docker_image_present(REAL_DOCKER_IMAGE),
+                     f"needs a Docker daemon and the {REAL_DOCKER_IMAGE} image")
+class RealDockerCase(DockerFlow):
+    """The docker adapter end to end against the real daemon."""
+
+    def test_real_docker_end_to_end(self):
+        wt = self.prepare_task("demo-real", image=REAL_DOCKER_IMAGE)
+        self.run_to_verified("demo-real")
+        with open(os.path.join(self.home, "runs", "demo-real.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["sandbox_adapter"], "docker")
+        self.assertTrue(sandbox.probes_passed(run["probes"]), run["probes"])
+        status = json.loads(self.dt12("status", "--home", self.home, "--task-id", "demo-real").stdout)
+        self.assertEqual(status["phase"], "local-verified")
+        for dirpath, _, filenames in os.walk(wt):
+            for name in filenames:
+                self.assertEqual(os.stat(os.path.join(dirpath, name)).st_uid, os.getuid(),
+                                 f"{dirpath}/{name} not owned by the host user")
+
 
 if __name__ == "__main__":
     unittest.main()

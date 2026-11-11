@@ -11,8 +11,8 @@ Emulates the three docker calls the adapter makes:
 
 Every invocation is appended as a JSON line to FAKE_DOCKER_LOG, so
 tests can assert on the exact argv the adapter built. This stub
-emulates the daemon; it is not Docker, and the adapter's real
-verification happens on a machine with Docker installed.
+emulates the daemon; it is not Docker. RealDockerCase in test_t12.py
+covers the real daemon where one answers.
 """
 
 import json

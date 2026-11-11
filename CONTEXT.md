@@ -42,5 +42,6 @@ enforces; this file states what it does *not* claim.
   the operator, so it can plant a hook, `git replace` ref, or smudge
   filter in the shared `.git`, or a `.pth` file in the verify home,
   and make a gate pass on a broken candidate. Closing that needs the
-  builder itself caged away from `.git` and the state home.
+  builder itself caged away from `.git` and the state home
+  (issue #4).
 - No network, no credentials, no model calls in the core or tests.
