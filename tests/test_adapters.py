@@ -16,7 +16,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-ROOT = "/home/hatch/workspace/turbo-12f"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANDIDATE = "a" * 40
 OTHER_HEAD = "b" * 40
 

@@ -74,7 +74,8 @@ class DeliverCase(unittest.TestCase):
     def t12(self, *args, expect=0):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         result = subprocess.run(
-            ["python3", "-m", "t12.cli", *args], cwd="/home/hatch/workspace/turbo-12f",
+            ["python3", "-m", "t12.cli", *args],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(result.returncode, expect,
                          f"t12 {' '.join(args)} -> {result.returncode}: {result.stderr}")
