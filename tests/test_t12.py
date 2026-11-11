@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from t12 import sandbox
@@ -896,6 +897,80 @@ class CliCase(unittest.TestCase):
         self.assertEqual(context["human_responses"], [
             {"question": "Should greet() strip whitespace?", "answer": "No, keep it as given."}])
         self.assertIn("red_test_ready", [t["name"] for t in context["tools"]])
+
+    def test_red_records_the_committed_test_not_a_later_edit(self):
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        test_file = os.path.join(self.worktree, "tests", "test_greet.py")
+        proc = subprocess.Popen(
+            [BIN, "red", "--home", self.home, "--task-id", "demo-1",
+             "--test-path", "tests/test_greet.py",
+             "--command", "python3 -c \"import time; time.sleep(2); print('FAILED'); raise SystemExit(1)\"",
+             "--marker", "FAILED", "--session", "sess-test-writer"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        time.sleep(1)
+        with open(test_file, "a") as fh:
+            fh.write("# edited while red ran\n")
+        self.assertEqual(proc.wait(timeout=60), 0, proc.stderr.read())
+        red = self.run_record()["red"]
+        committed = self._git(self.worktree, "rev-parse", f"{red['commit']}:tests/test_greet.py")
+        self.assertEqual(red["test_blob"], committed)
+
+    def test_red_accepts_a_test_in_a_new_directory(self):
+        self.write_worktree("tests/unit/test_greet.py", TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", "demo-1",
+                 "--test-path", "tests/unit/test_greet.py",
+                 "--command", "python3 -m unittest discover -s tests/unit -t tests/unit -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        self.assertEqual(self.phase(), "red")
+
+    def test_verify_deps_may_not_overlap(self):
+        for bad in (["vendor", "vendor/sub"], ["vendor", "vendor"], ["vendor/sub", "vendor"]):
+            home, task = self.prepare_custom("demo-overlap", verify_deps=bad)
+            result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+            self.assertIn("overlap", result.stderr)
+            shutil.rmtree(home)
+
+    def test_act_stops_at_the_operation_budget(self):
+        home, task = self.prepare_custom("demo-ops", op_limit=2)
+        self.t12("prepare", "--home", home, "--task", task)
+        path = os.path.join(self.tmp.name, "bad.json")
+        with open(path, "w") as fh:
+            fh.write("not json")
+        for _ in range(2):
+            self.t12("act", "--home", home, "--task-id", "demo-ops", "--role", "builder",
+                     "--session", "s", "--input", path, expect=1)
+        result = self.t12("act", "--home", home, "--task-id", "demo-ops", "--role", "builder",
+                          "--session", "s", "--input", path, expect=1)
+        self.assertIn("operation budget exhausted", result.stderr)
+        self.assertEqual(self.run_record(home, "demo-ops")["budgets"]["ops_used"], 2)
+
+    def test_act_refuses_while_paused_and_binds_the_qa_session(self):
+        qa = {"tool": "qa_report", "args": {"verdict": "pass", "commands": [], "failures": []}}
+        self.act("qa", "sess-qa", qa)
+        result = self.act("builder", "sess-qa", {"tool": "implementation_ready",
+                                                 "args": {"summary": "x"}}, expect=1)
+        self.assertIn("already bound to the qa role", result.stderr)
+        self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
+        result = self.act("qa", "sess-qa", qa, expect=1)
+        self.assertIn("paused", result.stderr)
+
+    def test_blank_answer_is_refused(self):
+        self.t12("escalate", "--home", self.home, "--task-id", "demo-1", "--question", "Which locale?")
+        result = self.t12("resume", "--home", self.home, "--task-id", "demo-1",
+                          "--answer", "   ", expect=1)
+        self.assertIn("Which locale?", result.stderr)
+        self.assertEqual(self.phase(), "paused")
+
+    def test_failed_red_costs_an_operation(self):
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: greet already works")
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", "demo-1",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+        self.assertEqual(self.run_record()["budgets"]["ops_used"], 1)
 
     def test_answer_without_an_open_question_is_refused(self):
         self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
