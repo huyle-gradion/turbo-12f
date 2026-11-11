@@ -23,7 +23,9 @@ EXPECTED = {
     "ready": {"red", "paused", "stopped"},
     "red": {"gates", "paused", "stopped"},
     "gates": {"gates", "green", "paused", "stopped"},
-    "green": {"local-verified", "paused", "stopped"},
+    # green -> gates is the review loop (Phase 6): a review can ask
+    # for changes after replay, so the builder re-stages.
+    "green": {"gates", "local-verified", "paused", "stopped"},
     "local-verified": set(),
     "paused": {"ready", "red", "gates", "green", "stopped"},
     "stopped": set(),

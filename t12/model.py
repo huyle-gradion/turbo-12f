@@ -15,6 +15,12 @@ from .errors import BudgetError, StateError
 VERSION = 1
 PROVENANCE = "observed-helper-execution"
 
+# Roles that run as separate worker invocations. A session id may be
+# bound to exactly one role per run: the same worker cannot write the
+# tests and the implementation, or review its own code.
+SESSION_ROLES = ("test-writer", "builder", "qa", "reviewer", "security")
+REVIEW_ROLES = ("reviewer", "security")
+
 PHASES = (
     "unadmitted",
     "ready",
@@ -34,7 +40,10 @@ TRANSITIONS = {
     "ready": {"red", "paused", "stopped"},
     "red": {"gates", "paused", "stopped"},
     "gates": {"gates", "green", "paused", "stopped"},
-    "green": {"local-verified", "paused", "stopped"},
+    # green -> gates is the review loop: after replay, a review can
+    # ask for changes, so the builder re-stages a new candidate.
+    # The re-stage voids the review and resets gates + replay.
+    "green": {"gates", "local-verified", "paused", "stopped"},
     "local-verified": set(),
     "paused": {"ready", "red", "gates", "green", "stopped"},
     "stopped": set(),
@@ -51,6 +60,80 @@ def events_path(home, task_id):
 
 def evidence_dir(home, task_id):
     return os.path.join(home, "evidence", task_id)
+
+
+def bound_sessions(run):
+    """All session ids bound so far, as {session: role}."""
+    bound = {}
+    for role, record in (run.get("roles") or {}).items():
+        bound[record["session"]] = role
+    for gate in run["gates"]:
+        if gate.get("run_by"):
+            bound[gate["run_by"]] = "qa"
+    for review in run.get("reviews") or []:
+        bound[review["session"]] = review["role"]
+    return bound
+
+
+def check_session(run, role, session):
+    """One session per role per run. A session already bound to a
+    different role cannot take this one — that would collapse the
+    separation the roles exist to enforce."""
+    if not session or not str(session).strip():
+        raise StateError(f"--session is required for the {role} role")
+    bound = bound_sessions(run)
+    other = bound.get(session)
+    if other is not None and other != role:
+        raise StateError(
+            f"session {session!r} is already bound to the {other} role; "
+            f"a separate worker session is required for {role}"
+        )
+
+
+def bind_session(run, role, session):
+    check_session(run, role, session)
+    run.setdefault("roles", {})[role] = {"session": session, "at": time.time()}
+
+
+def latest_review(run, role, commit=None):
+    """The latest non-voided review for a role, optionally on one commit."""
+    for review in reversed(run.get("reviews") or []):
+        if review["role"] != role or review["voided"]:
+            continue
+        if commit is not None and review["commit"] != commit:
+            continue
+        return review
+    return None
+
+
+def check_reviews(run):
+    """Green requires an approving review for every required role, on
+    the current candidate. A changes-requested review newer than the
+    latest approval blocks; a missing review blocks."""
+    candidate = (run["candidate"] or {}).get("commit")
+    if not candidate:
+        raise StateError("green requires a staged candidate")
+    for role in run.get("required_reviews") or []:
+        review = latest_review(run, role, commit=candidate)
+        if review is None:
+            raise StateError(
+                f"green requires an approving {role} review on {candidate[:12]}; none recorded"
+            )
+        if review["verdict"] != "approve":
+            raise StateError(
+                f"green blocked: the latest {role} review on {candidate[:12]} "
+                f"is {review['verdict']!r}"
+            )
+
+
+def void_reviews(run, reason):
+    """A re-stage voids reviews bound to the old candidate. They stay
+    in the record (audit trail) and the next review for the role
+    starts from the voided one — review remembers."""
+    for review in run.get("reviews") or []:
+        if not review["voided"]:
+            review["voided"] = True
+            review["voided_reason"] = reason
 
 
 def record_measurements(run):
@@ -92,6 +175,12 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         raise StateError("task must declare at least one gate")
     if not task.get("acceptance_criteria"):
         raise StateError("task must declare at least one acceptance criterion")
+    required_reviews = task.get("required_reviews", ["reviewer"])
+    if not isinstance(required_reviews, list) or any(
+            r not in REVIEW_ROLES for r in required_reviews):
+        raise StateError(
+            f"required_reviews must be a list of {list(REVIEW_ROLES)}: {required_reviews!r}"
+        )
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -124,6 +213,9 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "require_probes": bool(task.get("require_probes", False)),
         "probes": [],
         "sandbox_adapter": None,
+        "roles": {},
+        "reviews": [],
+        "required_reviews": list(required_reviews),
     }
 
 

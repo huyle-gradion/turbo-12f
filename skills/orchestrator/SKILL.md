@@ -11,6 +11,29 @@ prepare -> test-writer (red) -> builder (implement) -> stage
   -> gates -> replay -> QA -> reviewer -> green -> human merge
 ```
 
+The review lane runs `t12 review --role reviewer --session <id>
+--verdict approve|changes-requested --report <file>` after replay;
+a task that lists `security` in `required_reviews` also needs
+`t12 review --role security ...`. `green` refuses without an
+approving review for every required role on the current candidate.
+
+## Sessions: one worker per role
+
+- Every role step carries its own session id (`--session` on red,
+  stage, gate, review). One session id may serve exactly one role
+  per run — the factory refuses a session already bound to another
+  role. The test-writer's session cannot stage, the builder's
+  session cannot review, and the reviewer's session cannot do
+  anything else on this run.
+- The orchestrator creates a fresh session per role per run and
+  passes its id through. Session ids are opaque strings (the host's
+  session ids); the factory records the claim and enforces
+  distinctness — it cannot prove two different ids are different
+  workers, and says so in the design doc.
+- A re-stage voids prior reviews. The next review for a role starts
+  from the voided report (`t12 context --role reviewer` shows it)
+  and is bound to the new candidate commit.
+
 - A task enters only through `prepare` with a task file: id, title,
   acceptance criteria, base, gates, budgets. If criteria are not
   verifiable without human judgment, stop with a gap report. The

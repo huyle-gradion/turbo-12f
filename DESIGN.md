@@ -316,7 +316,12 @@ patience to rewrite the whole chain from genesis can forge a
 history — the chain detects edits, it does not prevent a full
 rewrite by the machine's owner. That is the honest boundary:
 tamper-evidence for accidents and for a compromised worker, not
-tamper-proofing against the operator.
+tamper-proofing against the operator. One corollary, found while
+testing Phase 6: a later command absorbs a prior record edit into
+the chain (its event's state digest is computed over the edited
+record), so the chain only detects edits made after the *last*
+event. The exit-code and evidence checks still catch a flipped
+gate or a changed test blob even after absorption.
 
 ## Limits (Phase 5)
 
@@ -356,13 +361,66 @@ file is plain JSON. Limits are per state home, not per product:
 different products' runs should live in different state homes if
 their shapes differ.
 
+## Roles (Phase 6)
+
+Phases 1–5 built the deterministic core; Phase 6 wires the people
+(and their agents) into it. The core still makes no model calls —
+the roles are separate worker invocations by the orchestrator, and
+the core's job is to make the separation checkable:
+
+- **One session per role.** Every role step carries a session id
+  (`--session` on `red`, `stage`, `gate`, `review`). A session id
+  may serve exactly one role per run; the factory refuses a
+  session already bound to another role. The test-writer's session
+  cannot stage, the builder's session cannot review, the QA
+  session cannot do anything else on the run. The same session
+  may repeat the same role (a re-review, a second gate) — that is
+  the same worker continuing, not a collapse of separation.
+- **The review is a command, not a comment.** `t12 review --role
+  reviewer|security --session <id> --verdict
+  approve|changes-requested --report <file>` runs after all gates
+  pass (phase `gates` or `green`), on the current candidate. The
+  report file is copied into evidence and hashed; the review
+  record binds role, session, verdict, candidate commit, report
+  ref, and the prior review for that role. `verify` re-hashes the
+  report like any other evidence.
+- **Green requires approval.** `green` refuses without an
+  approving review for every role in the task's
+  `required_reviews` (default `["reviewer"]`; a task can add
+  `"security"` or set `[]` to opt out) on the current candidate.
+  A `changes-requested` review newer than the latest approval
+  blocks. Evidence failures are still checked first, so a
+  tampered gate or test blob surfaces before the review policy.
+- **Re-stage voids reviews.** A new candidate resets gates,
+  clears the replay, and marks prior reviews voided — they stay
+  in the record as the audit trail. The state machine allows
+  green → gates for this loop (Phase 2's matrix was amended
+  deliberately, spec and implementation together). The next
+  review for the role records the voided report as
+  `prior_review`, and `t12 context --role reviewer` surfaces it:
+  review remembers is state the factory carries forward, not a
+  note the reviewer has to find.
+- **Security is a review role, not a gate.** It has its own owned
+  prompt (`prompts/security.md`) and skill (`skills/security/`),
+  the same report + verdict protocol, and its own findings
+  vocabulary (Secret / Injection / Auth / Exposure / Dependency).
+  A task declares it in `required_reviews` when it matters.
+
+What the factory cannot prove: session ids are claims. Two
+different ids could in principle be the same worker, and the core
+has no way to know. The enforcement is over the claim, and the
+claim is recorded. If the host cannot be trusted to hand out
+distinct sessions per role, the separation is only as strong as
+the host — that is stated here rather than papered over.
+
 ## Layout
 
 ```text
 bin/t12                  launcher (resolves the package from its own path)
 t12/
   cli.py                 commands: init/prepare/red/stage/gate/replay/
-                         green/manifest/status/pause/resume/escalate/context
+                         review/green/manifest/status/pause/resume/
+                         escalate/context/verify/probe/report/calibrate
   model.py               phases, transitions, budgets, run record (Factor 5/8/12)
   runner.py              safe subprocess: argv only, timeout, kill group,
                          sanitized env, duration + exit captured
@@ -438,9 +496,20 @@ examples/                a sample task file
    writes them to `limits.json` with `--apply`. `prepare` uses a
    task's own budgets first, calibrated defaults next, built-ins
    last, and records which source applied.
-6. **Roles** — builder / test-writer / QA / security / reviewer as
-   separate worker invocations with their own prompts, worktrees,
-   and evidence; review loop with prior-report memory.
+6. **Roles — DONE 2026-11-11.** Each role runs as a separate
+   worker invocation with its own session id (`--session` on red,
+   stage, gate, review). One session serves exactly one role per
+   run — the factory refuses a session already bound to another
+   role, so the test-writer cannot stage, the builder cannot
+   review, and the reviewer cannot do anything else on the run.
+   `t12 review` (reviewer / security) records a report as
+   evidence, bound to the candidate commit; `green` requires an
+   approving review for every role the task lists in
+   `required_reviews` (default `["reviewer"]`) on the current
+   candidate. A re-stage voids prior reviews and resets gates +
+   replay — the state machine now allows green → gates for the
+   review loop — and the next review starts from the voided report
+   (review remembers, via `t12 context --role reviewer`).
 7. **Delivery** — GitHub/Asana adapters last, merge gate pinned to
    head SHA, merge outcomes `confirmed / rejected / denied /
    uncertain`, never a blind retry on uncertain.

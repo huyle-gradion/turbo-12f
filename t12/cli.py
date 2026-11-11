@@ -17,7 +17,7 @@ from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
-ROLES = ("test-writer", "builder", "reviewer", "qa")
+ROLES = ("test-writer", "builder", "reviewer", "qa", "security")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -281,6 +281,17 @@ def cmd_context(args):
         prompt = fh.read()
     wt = run["worktree"]
     changed = gitio.dirty_paths(wt) if os.path.isdir(wt) else []
+    prior_review = None
+    if args.role in model.REVIEW_ROLES:
+        for review in reversed(run.get("reviews") or []):
+            if review["role"] == args.role:
+                prior_review = {
+                    "verdict": review["verdict"],
+                    "commit": review["commit"],
+                    "report": review["report"]["name"],
+                    "voided": review["voided"],
+                }
+                break
     context = {
         "task_id": run["task_id"],
         "title": run["title"],
@@ -296,6 +307,8 @@ def cmd_context(args):
             "repairs_left": run["budgets"]["repair_cap"] - run["budgets"]["repairs_used"],
         },
         "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
+        "roles": run.get("roles", {}),
+        "prior_review": prior_review,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
     }
@@ -312,6 +325,7 @@ def cmd_red(args):
         raise StateError(f"red requires phase 'ready', run is {run['phase']!r}")
     model.check_budgets(run)
     _require_probes(run)
+    model.check_session(run, "test-writer", args.session)
     wt = _check_worktree(run)
     test_path = args.test_path
     if not os.path.exists(os.path.join(wt, test_path)):
@@ -356,6 +370,7 @@ def cmd_red(args):
         "commit": commit,
     }
     model.bump_op(run)
+    model.bind_session(run, "test-writer", args.session)
     model.transition(run, "red")
     _save(home, run, "red", {"commit": commit, "test_path": test_path})
     print(f"red: commit={commit[:12]} test={test_path}")
@@ -365,9 +380,10 @@ def cmd_red(args):
 def cmd_stage(args):
     home = _home(args)
     run = _run(home, args.task_id)
-    if run["phase"] not in ("red", "gates"):
-        raise StateError(f"stage requires phase 'red' or 'gates', run is {run['phase']!r}")
+    if run["phase"] not in ("red", "gates", "green"):
+        raise StateError(f"stage requires phase 'red', 'gates' or 'green', run is {run['phase']!r}")
     model.check_budgets(run)
+    model.check_session(run, "builder", args.session)
     wt = _check_worktree(run)
     if not gitio.is_clean(wt):
         raise StateError("refusing stage: worktree has uncommitted changes")
@@ -378,10 +394,13 @@ def cmd_stage(args):
         raise StateError("refusing stage: candidate does not descend from the red commit")
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
-    if run["phase"] == "gates":
+    if run["phase"] in ("gates", "green"):
         gate_mod.reset_for_new_candidate(run)
+        run["replay"] = None
+        model.void_reviews(run, f"superseded by {candidate[:12]}")
     run["candidate"] = {"commit": candidate, "staged_at": time.time()}
     model.bump_op(run)
+    model.bind_session(run, "builder", args.session)
     model.transition(run, "gates")
     _save(home, run, "staged", {"commit": candidate})
     print(f"staged: candidate={candidate[:12]}")
@@ -395,6 +414,7 @@ def cmd_gate(args):
         raise StateError(f"gate requires phase 'gates', run is {run['phase']!r}")
     model.check_budgets(run)
     _require_probes(run)
+    model.check_session(run, "qa", args.session)
     wt = _check_worktree(run)
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
@@ -402,6 +422,7 @@ def cmd_gate(args):
     obs = runner.run(gate["command"], cwd=wt, timeout_s=_time_left(run),
                      env=env, sandbox=ctx)
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
+    gate["run_by"] = args.session
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
         gate["status"] = "failed"
@@ -474,6 +495,55 @@ def cmd_replay(args):
     return 0
 
 
+def cmd_review(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    role = args.role
+    if run["phase"] not in ("gates", "green"):
+        raise StateError(f"review requires phase 'gates' or 'green', run is {run['phase']!r}")
+    if not gate_mod.all_passed(run):
+        raise StateError("review requires all gates to pass first")
+    model.check_budgets(run)
+    _require_probes(run)
+    model.check_session(run, role, args.session)
+    wt = _check_worktree(run)
+    if gitio.head(wt) != run["candidate"]["commit"]:
+        raise StateError("refusing review: HEAD moved since stage")
+    report_path = os.path.abspath(args.report)
+    if not os.path.isfile(report_path):
+        raise StateError(f"review report not found: {args.report}")
+    with open(report_path, "rb") as fh:
+        data = fh.read()
+    if not data.strip():
+        raise StateError("review report is empty")
+    prior = None
+    for review in reversed(run.get("reviews") or []):
+        if review["role"] == role:
+            prior = review
+            break
+    n = len([r for r in run.get("reviews") or [] if r["role"] == role]) + 1
+    ref = evidence.write_evidence(home, run["task_id"], f"review-{role}-{n}.md", data)
+    model.bind_session(run, role, args.session)
+    model.bump_op(run)
+    run["reviews"].append({
+        "role": role,
+        "session": args.session,
+        "verdict": args.verdict,
+        "commit": run["candidate"]["commit"],
+        "report": ref,
+        "prior_review": prior["report"]["name"] if prior else None,
+        "voided": False,
+        "voided_reason": None,
+        "at": time.time(),
+    })
+    _save(home, run, "reviewed", {
+        "role": role, "verdict": args.verdict,
+        "commit": run["candidate"]["commit"][:12],
+    })
+    print(f"review: {role} {args.verdict} on {run['candidate']['commit'][:12]}")
+    return 0
+
+
 def cmd_green(args):
     home = _home(args)
     run = _run(home, args.task_id)
@@ -489,6 +559,7 @@ def cmd_green(args):
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing green: red test file changed after the red phase")
     evidence.verify_green(home, run)
+    model.check_reviews(run)
     model.bump_op(run)
     model.transition(run, "local-verified")
     model.record_measurements(run)
@@ -542,6 +613,8 @@ def cmd_verify(args):
     for probe in run.get("probes") or []:
         if probe.get("output"):
             refs.append((f"probe:{probe['name']}", probe["output"]))
+    for review in run.get("reviews") or []:
+        refs.append((f"review:{review['role']}", review["report"]))
     ref_problems = []
     for label, ref in refs:
         try:
@@ -808,18 +881,30 @@ def build_parser():
 
     p = sub.add_parser("red"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--test-path", required=True); p.add_argument("--command", required=True)
-    p.add_argument("--marker", required=True)
+    p.add_argument("--marker", required=True); p.add_argument("--session", required=True,
+                   help="test-writer session id (must differ from every other role's session)")
     p.set_defaults(func=cmd_red)
 
     p = sub.add_parser("stage"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--session", required=True,
+                   help="builder session id (must differ from the test-writer session)")
     p.set_defaults(func=cmd_stage)
 
     p = sub.add_parser("gate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
-    p.add_argument("--name", required=True)
+    p.add_argument("--name", required=True); p.add_argument("--session", required=True,
+                   help="QA session id (must differ from the builder session)")
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("replay"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_replay)
+
+    p = sub.add_parser("review"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--role", required=True, choices=list(model.REVIEW_ROLES))
+    p.add_argument("--session", required=True,
+                   help="reviewer session id (must differ from every other role's session)")
+    p.add_argument("--verdict", required=True, choices=["approve", "changes-requested"])
+    p.add_argument("--report", required=True, help="review report file (stored as evidence)")
+    p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("green"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_green)

@@ -39,12 +39,20 @@ bin/t12 context --home /path/to/state-home --task-id demo-1 \
   --role builder --phase implement
 bin/t12 stage --home /path/to/state-home --task-id demo-1
 
-# 5. Run the gates in order, replay the red test, certify
+# 5. Run the gates in order, replay the red test, review, certify
 bin/t12 gate --home /path/to/state-home --task-id demo-1 --name unit
 bin/t12 replay --home /path/to/state-home --task-id demo-1
+bin/t12 review --home /path/to/state-home --task-id demo-1 --role reviewer \
+  --session <reviewer-session> --verdict approve --report review.md
 bin/t12 green --home /path/to/state-home --task-id demo-1
 bin/t12 manifest --home /path/to/state-home --task-id demo-1
 ```
+
+Each role step carries its own session id (`--session` on red,
+stage, gate, review); one session serves exactly one role per run,
+so the test-writer cannot stage and the builder cannot review. A
+task lists the reviews green requires in `required_reviews`
+(default `["reviewer"]`; add `"security"` when it matters).
 
 `local-verified` means the configured evidence chain was observed and
 is internally consistent. It is not acceptance and not permission to
@@ -61,7 +69,8 @@ merge — a human merges.
 | `stage` | Pin the candidate commit; verify ancestry, clean tree, unchanged test blob |
 | `gate` | Run one gate in order; failure counts against the repair cap |
 | `replay` | Re-run the exact red command on the candidate; expect success |
-| `green` | Re-hash and re-validate all evidence; certify `local-verified` |
+| `review` | Record a reviewer/security review: `--role reviewer\|security --session S --verdict approve\|changes-requested --report FILE` |
+| `green` | Re-hash and re-validate all evidence; requires replay + approving reviews; certify `local-verified` |
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |

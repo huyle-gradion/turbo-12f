@@ -112,22 +112,33 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_greet.py",
             "--command", "python3 -m unittest tests.test_greet -q",
-            "--marker", "FAILED",
+            "--marker", "FAILED", "--session", "sess-test-writer",
         )
         self.assertEqual(self.phase(), "red")
 
     def do_implement_and_stage(self):
         self.write_worktree("app.py", APP_V2)
         self.commit_worktree("feat: implement greet")
-        self.t12("stage", "--home", self.home, "--task-id", "demo-1")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
         self.assertEqual(self.phase(), "gates")
+
+    def do_review(self, home=None, task_id="demo-1", verdict="approve",
+                  session="sess-reviewer", role="reviewer"):
+        home = home or self.home
+        report = os.path.join(self.tmp.name, f"review-{task_id}-{role}.md")
+        with open(report, "w") as fh:
+            fh.write(f"Verdict: {verdict}\n\n## Findings\n\nNone. Hypotheses checked against the diff; verification re-run.\n")
+        self.t12("review", "--home", home, "--task-id", task_id,
+                 "--role", role, "--session", session,
+                 "--verdict", verdict, "--report", report)
 
     def test_happy_path_to_local_verified(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "green")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "local-verified")
         manifest = os.path.join(self.home, "evidence", "demo-1", "manifest.txt")
@@ -162,20 +173,20 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home2, "--task-id", "two-gates",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED")
+                 "--marker", "FAILED", "--session", "sess-test-writer")
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
         self._git(wt, "commit", "-m", "feat: implement greet")
-        self.t12("stage", "--home", home2, "--task-id", "two-gates")
+        self.t12("stage", "--home", home2, "--task-id", "two-gates", "--session", "sess-builder")
         result = self.t12("gate", "--home", home2, "--task-id", "two-gates",
-                          "--name", "second", expect=1)
+                          "--name", "second", "--session", "sess-qa", expect=1)
         self.assertIn("cannot run before gate 'first'", result.stderr)
 
     def test_tampered_evidence_blocks_green(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
         red_out = os.path.join(self.home, "evidence", "demo-1", "red-output.txt")
         with open(red_out, "a") as fh:
@@ -194,7 +205,7 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_greet.py",
             "--command", "python3 -m unittest tests.test_greet -q",
-            "--marker", "FAILED", expect=1,
+            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
         )
         self.assertIn("did not fail", result.stderr)
         self.assertEqual(self.phase(), "ready")
@@ -220,7 +231,7 @@ class CliCase(unittest.TestCase):
             "status", "--home", self.home, "--task-id", "demo-1").stdout)
         self.assertEqual(status["stop_reason"], "abandoned")
         # A stopped run cannot move again.
-        self.t12("stage", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder", expect=1)
 
     def test_supersede_active_run_refused(self):
         self.do_red()
@@ -251,8 +262,9 @@ class CliCase(unittest.TestCase):
         self.assertEqual(status["phase"], "ready")
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "local-verified")
 
@@ -311,14 +323,15 @@ class CliCase(unittest.TestCase):
         result = self.t12("red", "--home", home2, "--task-id", "demo-rp",
                           "--command", "python3 -m unittest tests.test_greet -q",
                           "--marker", "nope", "--test-path", "tests/test_greet.py",
-                          expect=1)
+                          "--session", "sess-test-writer", expect=1)
         self.assertIn("safety probes have not passed", result.stderr)
 
     def test_verify_passes_on_happy_path(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.t12("manifest", "--home", self.home, "--task-id", "demo-1")
         result = self.t12("verify", "--home", self.home, "--task-id", "demo-1")
@@ -353,7 +366,7 @@ class CliCase(unittest.TestCase):
     def test_green_refuses_tampered_run_record(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
         run_path = os.path.join(self.home, "runs", "demo-1.json")
         with open(run_path) as fh:
@@ -380,13 +393,13 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home2, "--task-id", "demo-fg",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED")
+                 "--marker", "FAILED", "--session", "sess-test-writer")
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
         self._git(wt, "commit", "-m", "feat: implement greet")
-        self.t12("stage", "--home", home2, "--task-id", "demo-fg")
-        self.t12("gate", "--home", home2, "--task-id", "demo-fg", "--name", "unit", expect=1)
+        self.t12("stage", "--home", home2, "--task-id", "demo-fg", "--session", "sess-builder")
+        self.t12("gate", "--home", home2, "--task-id", "demo-fg", "--name", "unit", "--session", "sess-qa", expect=1)
         # Forge the pass in the record, then absorb the edit into the
         # chain with a probe run, so only the exit-code check can catch it.
         run_path = os.path.join(home2, "runs", "demo-fg.json")
@@ -405,8 +418,9 @@ class CliCase(unittest.TestCase):
     def test_manifest_tamper_detected(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.t12("manifest", "--home", self.home, "--task-id", "demo-1")
         result = self.t12("verify", "--home", self.home, "--task-id", "demo-1")
@@ -428,28 +442,30 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", task_id,
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED")
+                 "--marker", "FAILED", "--session", "sess-test-writer")
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
         self._git(wt, "commit", "-m", "feat: implement greet")
-        self.t12("stage", "--home", self.home, "--task-id", task_id)
-        self.t12("gate", "--home", self.home, "--task-id", task_id, "--name", "unit")
+        self.t12("stage", "--home", self.home, "--task-id", task_id, "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", task_id, "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", task_id)
+        self.do_review(task_id=task_id)
         self.t12("green", "--home", self.home, "--task-id", task_id)
 
     def test_measurements_recorded_at_green(self):
         self.do_red()
         self.do_implement_and_stage()
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         with open(os.path.join(self.home, "runs", "demo-1.json")) as fh:
             run = json.load(fh)
         m = run["measurements"]
         self.assertIsNotNone(m)
         self.assertGreater(m["wall_used_s"], 0)
-        self.assertEqual(m["ops_used"], 5)
+        self.assertEqual(m["ops_used"], 6)
         self.assertEqual(m["repairs_used"], 0)
         self.assertEqual(m["gates"], 1)
         self.assertEqual(run["budget_source"], "task")
@@ -504,13 +520,156 @@ class CliCase(unittest.TestCase):
         self.assertEqual(run["budgets"]["time_limit_s"], 123)
         self.assertEqual(run["budget_source"], "task")
 
+    def test_session_separation_enforced(self):
+        self.do_red()
+        result = self.t12("stage", "--home", self.home, "--task-id", "demo-1",
+                          "--session", "sess-test-writer", expect=1)
+        self.assertIn("already bound to the test-writer role", result.stderr)
+        self.do_implement_and_stage()
+        result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                          "--name", "unit", "--session", "sess-builder", expect=1)
+        self.assertIn("already bound to the builder role", result.stderr)
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        report = os.path.join(self.tmp.name, "review-x.md")
+        with open(report, "w") as fh:
+            fh.write("Verdict: approve\n")
+        for bad in ("sess-test-writer", "sess-builder", "sess-qa"):
+            result = self.t12("review", "--home", self.home, "--task-id", "demo-1",
+                              "--role", "reviewer", "--session", bad,
+                              "--verdict", "approve", "--report", report, expect=1)
+            self.assertIn("already bound", result.stderr)
+        self.do_review()
+
+    def test_green_requires_review(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("requires an approving reviewer review", result.stderr)
+        self.do_review()
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.phase(), "local-verified")
+
+    def test_changes_requested_blocks_green(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review(verdict="changes-requested")
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("blocked", result.stderr)
+        self.do_review()
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.phase(), "local-verified")
+
+    def test_restage_voids_review(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
+        # Re-stage a new candidate: the review is voided, green refuses.
+        self.write_worktree("app.py", APP_V2 + "# note: re-staged\n")
+        self.commit_worktree("feat: note")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("requires an approving reviewer review", result.stderr)
+        with open(os.path.join(self.home, "runs", "demo-1.json")) as fh:
+            run = json.load(fh)
+        self.assertTrue(run["reviews"][0]["voided"])
+        self.do_review()
+        with open(os.path.join(self.home, "runs", "demo-1.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["reviews"][1]["prior_review"],
+                         run["reviews"][0]["report"]["name"])
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.phase(), "local-verified")
+
+    def test_security_review_required(self):
+        task = task_dict(task_id="demo-sec")
+        task["required_reviews"] = ["reviewer", "security"]
+        task_path = os.path.join(self.tmp.name, "task-demo-sec.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.t12("prepare", "--home", self.home, "--task", task_path)
+        wt = os.path.join(self.home, "worktrees", "demo-sec")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", "demo-sec",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "add", ".")
+        self._git(wt, "commit", "-m", "feat: implement greet")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-sec",
+                 "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-sec",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-sec")
+        self.do_review(task_id="demo-sec")
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-sec", expect=1)
+        self.assertIn("requires an approving security review", result.stderr)
+        self.do_review(task_id="demo-sec", role="security", session="sess-security")
+        self.t12("green", "--home", self.home, "--task-id", "demo-sec")
+        out = self.t12("status", "--home", self.home, "--task-id", "demo-sec").stdout
+        self.assertEqual(json.loads(out)["phase"], "local-verified")
+
+    def test_review_report_stored_and_verified(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
+        report = os.path.join(self.home, "evidence", "demo-1", "review-reviewer-1.md")
+        self.assertTrue(os.path.exists(report))
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(result.returncode, 0)
+        with open(report, "a") as fh:
+            fh.write("forged\n")
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("FAIL evidence-refs", result.stdout + result.stderr)
+
+    def test_context_shows_roles_and_prior_review(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", "reviewer", "--phase", "gates")
+        context = json.loads(result.stdout.split("--- context (JSON) ---\n", 1)[1])
+        self.assertEqual(context["roles"]["test-writer"]["session"], "sess-test-writer")
+        self.assertEqual(context["roles"]["builder"]["session"], "sess-builder")
+        self.assertIsNone(context["prior_review"])
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
+        self.write_worktree("app.py", APP_V2 + "# note: re-staged\n")
+        self.commit_worktree("feat: note")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", "reviewer", "--phase", "gates")
+        context = json.loads(result.stdout.split("--- context (JSON) ---\n", 1)[1])
+        self.assertTrue(context["prior_review"]["voided"])
+        self.assertEqual(context["prior_review"]["report"], "review-reviewer-1.md")
+
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
         self.write_worktree("app.py", APP_WRONG)  # close, but still failing
         self.commit_worktree("feat: wrong implementation")
-        self.t12("stage", "--home", self.home, "--task-id", "demo-1")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
         result = self.t12("gate", "--home", self.home, "--task-id", "demo-1",
-                          "--name", "unit", expect=1)
+                          "--name", "unit", "--session", "sess-qa", expect=1)
         self.assertIn("failed", result.stderr)
         status = json.loads(self.t12(
             "status", "--home", self.home, "--task-id", "demo-1").stdout)
@@ -518,9 +677,10 @@ class CliCase(unittest.TestCase):
         # Fix, re-stage: gate observations reset, candidate re-pinned.
         self.write_worktree("app.py", APP_V2)
         self.commit_worktree("feat: fix greet")
-        self.t12("stage", "--home", self.home, "--task-id", "demo-1")
-        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
         self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.do_review()
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "local-verified")
 

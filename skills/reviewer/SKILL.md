@@ -53,11 +53,23 @@ again with its original id; skip the fresh pass.
 
 ## Report
 
-Lead with the verdict: `merge-ready | blocked | human-gated |
-unverified`. Findings grouped by severity, verification commands +
-results, and which lane owns each fix. Only say merge-ready when
-review evidence is clean and verification passed. If evidence is
-missing, say what is unverified.
+A markdown report file starting with `Verdict: approve |
+changes-requested`, then hypotheses, findings grouped by severity,
+verification commands + results, and which lane owns each fix.
+Verdict mapping: `merge-ready` → `approve`; `blocked`,
+`human-gated`, or `unverified` → `changes-requested` (a human gate
+names its unblock step). Only say `approve` when review evidence is
+clean and verification passed. If evidence is missing, say what is
+unverified.
+
+## Sessions
+
+You are a separate worker session from the builder, the
+test-writer, QA, and security. The factory refuses a review from a
+session already bound to another role. Never reuse another role's
+session. A re-stage voids your review; the next review starts from
+the voided report (review remembers) and is bound to the new
+candidate commit.
 
 ## Merge
 

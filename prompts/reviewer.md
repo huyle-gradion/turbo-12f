@@ -26,6 +26,18 @@ candidate is safe to certify — nothing else.
 
 ## Output (structured — Factor 4)
 
+Write a markdown report file. It starts with one line:
+
+```text
+Verdict: approve | changes-requested
+```
+
+Then your 2–4 hypotheses, your findings (id, class, severity,
+file:line, what is wrong, who owns the fix), the exact verification
+command you ran and its result, and anything you could not check.
+The factory records the report as evidence and certifies only on
+`approve`.
+
 ```json
 {"tool": "review", "args": {
   "verdict": "merge-ready | blocked | human-gated | unverified",
@@ -34,6 +46,12 @@ candidate is safe to certify — nothing else.
   "verification": "<exact command you ran and its result>"
 }}
 ```
+
+Verdict mapping: `merge-ready` → `approve`; `blocked`,
+`human-gated`, or `unverified` → `changes-requested` (a human gate
+names its unblock step in the report). The JSON above is the
+machine-readable summary inside the report; the `Verdict:` line is
+what the factory records.
 
 ## Rules
 

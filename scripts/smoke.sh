@@ -38,14 +38,25 @@ EOF
 "$T12" red --home "$HOME_DIR" --task-id demo-1 \
   --test-path tests/test_greet.py \
   --command "python3 -m unittest tests.test_greet -q" \
-  --marker FAILED
+  --marker FAILED --session sess-test-writer
 
 printf 'def greet(name="world"):\n    return f"Hello, {name}!"\n' > "$WT/app.py"
 git -C "$WT" add . && git -C "$WT" commit -qm "feat: implement greet"
 
-"$T12" stage --home "$HOME_DIR" --task-id demo-1
-"$T12" gate --home "$HOME_DIR" --task-id demo-1 --name unit
+"$T12" stage --home "$HOME_DIR" --task-id demo-1 --session sess-builder
+"$T12" gate --home "$HOME_DIR" --task-id demo-1 --name unit --session sess-qa
 "$T12" replay --home "$HOME_DIR" --task-id demo-1
+
+cat > "$TMP/review.md" <<'EOF'
+Verdict: approve
+
+## Findings
+
+None. Hypotheses checked against the diff; verification re-run.
+EOF
+"$T12" review --home "$HOME_DIR" --task-id demo-1 --role reviewer \
+  --session sess-reviewer --verdict approve --report "$TMP/review.md"
+
 "$T12" green --home "$HOME_DIR" --task-id demo-1
 "$T12" manifest --home "$HOME_DIR" --task-id demo-1
 
