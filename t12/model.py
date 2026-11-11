@@ -152,7 +152,7 @@ def record_measurements(run):
 
 
 def new_run(task, repo, home, supersedes=None, defaults=None,
-            defaults_source="builtin"):
+            defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
     defaults = defaults or limits_mod.BUILTIN_DEFAULTS
     budget_source = defaults_source
@@ -212,7 +212,8 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "stop_reason": None,
         "require_probes": bool(task.get("require_probes", False)),
         "probes": [],
-        "sandbox_adapter": None,
+        "sandbox_adapter": sandbox_adapter,
+        "sandbox_image": sandbox_image,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),

@@ -34,9 +34,12 @@ def run(argv, cwd, timeout_s, env=None, sandbox=None):
     Never raises for a non-zero exit: that is data. Raises RunnerError
     only when the command cannot be launched at all. Forbidden
     bypass flags are rejected before launch. When `sandbox` is
-    given ({"worktree", "verify_home"}), verification commands run
-    under the Landlock cage where the OS supports it; the
-    observation records which adapter applied ("landlock" or "none").
+    given ({"worktree", "verify_home", "adapter", "image"}),
+    verification commands run under that adapter: the Landlock cage
+    where the OS supports it, or a `docker run` container with no
+    network and only the worktree + verify-home mounted when the
+    run's adapter is docker. The observation records which adapter
+    applied ("landlock", "docker", or "none").
     """
     if isinstance(argv, (str, bytes)):
         raise RunnerError("argv must be a list, never a shell string")
@@ -53,7 +56,26 @@ def run(argv, cwd, timeout_s, env=None, sandbox=None):
     }
     sandbox_used = "none"
     if sandbox is not None:
-        if sandbox_module.landlock_available():
+        adapter = sandbox.get("adapter")
+        if adapter is None:
+            adapter = "landlock" if sandbox_module.landlock_available() else "none"
+        if adapter == "docker":
+            # The container gets only the verification env, never the
+            # host's environment: secrets live in the host env and
+            # must not ride in through `-e`. Two factory-controlled
+            # values join it: no git protocols, and no __pycache__
+            # writes — without the latter, the verification commands
+            # themselves dirty the worktree and green refuses.
+            container_env = {"GIT_ALLOW_PROTOCOL": "none",
+                             "PYTHONDONTWRITEBYTECODE": "1"}
+            if env:
+                container_env.update(env)
+            argv = sandbox_module.docker_run_argv(
+                sandbox.get("image") or sandbox_module.DEFAULT_DOCKER_IMAGE,
+                sandbox["worktree"], sandbox["verify_home"],
+                container_env, argv)
+            sandbox_used = "docker"
+        elif adapter == "landlock" and sandbox_module.landlock_available():
             kwargs["preexec_fn"] = sandbox_module.landlock_preexec(
                 sandbox["worktree"], sandbox["verify_home"])
             sandbox_used = "landlock"

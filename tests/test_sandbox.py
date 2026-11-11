@@ -11,9 +11,10 @@ import socketserver
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from t12 import runner, sandbox
-from t12.errors import RunnerError
+from t12.errors import RunnerError, StateError
 
 
 class FlagTest(unittest.TestCase):
@@ -165,6 +166,56 @@ class ProbeTest(unittest.TestCase):
             {"name": "a", "passed": True}, {"name": "b", "passed": False}]))
         self.assertTrue(sandbox.probes_passed([
             {"name": "a", "passed": True}, {"name": "b", "passed": True}]))
+
+
+class DockerTest(unittest.TestCase):
+    def test_docker_run_argv(self):
+        argv = sandbox.docker_run_argv(
+            "python:3.12-slim", "/wt", "/vh",
+            {"HOME": "/vh", "TMPDIR": "/vh/.tmp", "GIT_CONFIG_NOSYSTEM": "1"},
+            ["python3", "-m", "unittest", "tests.test_greet", "-q"])
+        self.assertEqual(argv[:5], ["docker", "run", "--rm", "--network", "none"])
+        self.assertIn("-v", argv)
+        self.assertIn("/wt:/wt:rw", argv)
+        self.assertIn("/vh:/vh:rw", argv)
+        self.assertIn("-w", argv)
+        self.assertEqual(argv[argv.index("-w") + 1], "/wt")
+        self.assertEqual(argv[argv.index("--user") + 1],
+                         f"{os.getuid()}:{os.getgid()}")
+        self.assertIn("-e", argv)
+        self.assertIn("HOME=/vh", argv)
+        self.assertNotIn("GITHUB_TOKEN", " ".join(argv))
+        self.assertEqual(argv[-6:], ["python:3.12-slim", "python3", "-m",
+                                     "unittest", "tests.test_greet", "-q"])
+
+    def test_resolve_adapter_docker(self):
+        with mock.patch.object(sandbox, "docker_available", return_value=True), \
+                mock.patch.object(sandbox, "docker_image_present", return_value=True):
+            adapter, image = sandbox.resolve_adapter({"sandbox_adapter": "docker"})
+            self.assertEqual((adapter, image), ("docker", "python:3.12-slim"))
+            adapter, image = sandbox.resolve_adapter(
+                {"sandbox_adapter": "docker", "sandbox_image": "node:22-slim"})
+            self.assertEqual((adapter, image), ("docker", "node:22-slim"))
+
+    def test_resolve_adapter_docker_fail_closed(self):
+        with mock.patch.object(sandbox, "docker_available", return_value=False):
+            with self.assertRaises(StateError):
+                sandbox.resolve_adapter({"sandbox_adapter": "docker"})
+        with mock.patch.object(sandbox, "docker_available", return_value=True), \
+                mock.patch.object(sandbox, "docker_image_present", return_value=False):
+            with self.assertRaises(StateError):
+                sandbox.resolve_adapter({"sandbox_adapter": "docker"})
+        with self.assertRaises(StateError):
+            sandbox.resolve_adapter({"sandbox_adapter": "bogus"})
+
+    def test_resolve_adapter_env_override_and_auto(self):
+        with mock.patch.object(sandbox, "docker_available", return_value=True), \
+                mock.patch.object(sandbox, "docker_image_present", return_value=True), \
+                mock.patch.dict(os.environ, {"T12_SANDBOX_ADAPTER": "docker"}):
+            self.assertEqual(sandbox.resolve_adapter({})[0], "docker")
+        adapter, image = sandbox.resolve_adapter({})
+        self.assertEqual(adapter, "landlock" if sandbox.landlock_available() else "none")
+        self.assertIsNone(image)
 
 
 if __name__ == "__main__":

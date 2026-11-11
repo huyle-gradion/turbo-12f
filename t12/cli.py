@@ -64,9 +64,13 @@ def _time_left(run):
 
 
 def _verification(home, run):
-    """Environment + sandbox context for verification commands."""
+    """Environment + sandbox context for verification commands. The
+    context carries the run's adapter, so every verification command
+    uses the adapter the run was admitted with."""
     env = sandbox.verification_env(home, run["task_id"])
-    ctx = {"worktree": run["worktree"], "verify_home": env["HOME"]}
+    ctx = {"worktree": run["worktree"], "verify_home": env["HOME"],
+           "adapter": run.get("sandbox_adapter"),
+           "image": run.get("sandbox_image")}
     return env, ctx
 
 
@@ -152,7 +156,8 @@ def _manifest_text(run):
         ]
     b = run["budgets"]
     lines.append("")
-    lines.append(f"Sandbox adapter: {run.get('sandbox_adapter') or 'unknown'}")
+    lines.append(f"Sandbox adapter: {run.get('sandbox_adapter') or 'unknown'}"
+                 + (f" (image {run['sandbox_image']})" if run.get("sandbox_image") else ""))
     lines.append("Probes:")
     for probe in run.get("probes") or []:
         lines.append(f"  - {probe['name']}: {'passed' if probe['passed'] else 'FAILED'} — {probe['detail']}")
@@ -241,16 +246,17 @@ def cmd_prepare(args):
         if gitio.branch_exists(repo, old["branch"]):
             gitio.delete_branch(repo, old["branch"])
     calibrated = limits.load_limits(home)
+    adapter, image = sandbox.resolve_adapter(task)
     run = model.new_run(task, repo, home, supersedes=supersedes,
                         defaults=calibrated,
-                        defaults_source="calibrated" if calibrated else "builtin")
+                        defaults_source="calibrated" if calibrated else "builtin",
+                        sandbox_adapter=adapter, sandbox_image=image)
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base)
     model.transition(run, "ready")
     _save(home, run, "prepared", {"branch": run["branch"], "base": base,
                                   "supersedes": supersedes})
-    run["sandbox_adapter"] = sandbox.detect_adapter()
     probes = sandbox.run_probes(home, run, runner.run)
     run["probes"] = probes
     if run["require_probes"] and not sandbox.probes_passed(probes):
@@ -772,6 +778,7 @@ def cmd_status(args):
         "candidate": run["candidate"]["commit"] if run["candidate"] else None,
         "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
         "sandbox_adapter": run.get("sandbox_adapter"),
+        "sandbox_image": run.get("sandbox_image"),
         "require_probes": run.get("require_probes", False),
         "probes": [{ "name": p["name"], "passed": p["passed"]}
                    for p in run.get("probes") or []],
@@ -879,7 +886,11 @@ def cmd_probe(args):
     home = _home(args)
     run = _run(home, args.task_id)
     _check_worktree(run)
-    run["sandbox_adapter"] = sandbox.detect_adapter()
+    # The probes use the run's recorded adapter, not a fresh
+    # detection: the run was admitted with one adapter, and
+    # re-probing must measure that one.
+    if not run.get("sandbox_adapter"):
+        run["sandbox_adapter"] = sandbox.detect_adapter()
     probes = sandbox.run_probes(home, run, runner.run)
     run["probes"] = probes
     _save(home, run, "probed", {"probes": [

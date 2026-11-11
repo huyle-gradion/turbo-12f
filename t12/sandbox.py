@@ -23,9 +23,10 @@ import platform
 import re
 import shutil
 import struct
+import subprocess
 
 from . import evidence, store
-from .errors import RunnerError
+from .errors import RunnerError, StateError
 
 # ---------------------------------------------------------------- flags
 
@@ -145,6 +146,85 @@ def detect_adapter():
     return "none"
 
 
+# ---------------------------------------------------------------- Docker
+
+DEFAULT_DOCKER_IMAGE = "python:3.12-slim"
+
+
+def docker_available():
+    """True when a docker binary exists and its daemon answers."""
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(["docker", "info"], capture_output=True, timeout=15)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def docker_image_present(image):
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image], capture_output=True, timeout=30)
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def resolve_adapter(task):
+    """(adapter, image) for a task. The request comes from the task
+    file's `sandbox_adapter` / `sandbox_image`, else the
+    T12_SANDBOX_ADAPTER / T12_SANDBOX_IMAGE environment, else auto.
+    An explicit docker request is fail-closed at admission: the
+    daemon must answer and the image must already be present
+    locally — no implicit pulls mid-run. An explicit landlock
+    request fails closed when the kernel cannot do it."""
+    requested = (task.get("sandbox_adapter")
+                 or os.environ.get("T12_SANDBOX_ADAPTER") or "auto")
+    image = (task.get("sandbox_image")
+             or os.environ.get("T12_SANDBOX_IMAGE") or DEFAULT_DOCKER_IMAGE)
+    if requested == "docker":
+        if not docker_available():
+            raise StateError(
+                "sandbox_adapter 'docker' requested but Docker is unavailable "
+                "(no docker binary or the daemon does not answer)")
+        if not docker_image_present(image):
+            raise StateError(
+                f"docker image {image!r} is not present locally; "
+                f"pull it first: docker pull {image}")
+        return "docker", image
+    if requested == "landlock":
+        if not landlock_available():
+            raise StateError(
+                "sandbox_adapter 'landlock' requested but this kernel cannot do it")
+        return "landlock", None
+    if requested == "auto":
+        return detect_adapter(), None
+    raise StateError(
+        f"unknown sandbox_adapter {requested!r}; use 'docker', 'landlock', or 'auto'")
+
+
+def docker_run_argv(image, worktree, verify_home, env, argv):
+    """`docker run` argv for one verification command. The container
+    gets no network (not even to the host), the worktree and the
+    verify-home mounted at their host paths, the host user's uid/gid
+    (so files it creates in the worktree are owned by the host user),
+    and only the verification env — never the host's environment, so
+    no secret can ride in through `-e`. The command itself is the
+    trailing argv, never a shell string."""
+    docker_argv = [
+        "docker", "run", "--rm", "--network", "none",
+        "-v", f"{worktree}:{worktree}:rw",
+        "-v", f"{verify_home}:{verify_home}:rw",
+        "-w", worktree,
+        "--user", f"{os.getuid()}:{os.getgid()}",
+    ]
+    for key in sorted(env):
+        docker_argv += ["-e", f"{key}={env[key]}"]
+    docker_argv += [image, *[str(a) for a in argv]]
+    return docker_argv
+
+
 def landlock_preexec(worktree, verify_home):
     """Build a preexec function that cages the child: worktree and
     verify-home writable, system dirs read-only, all TCP denied.
@@ -220,6 +300,7 @@ sys.exit(0)
 
 _EXTERNAL_PROBE = """
 import os, socket, sys
+outside = sys.argv[1]
 granted = []
 try:
     socket.create_connection(("8.8.8.8", 53), timeout=3)
@@ -227,10 +308,10 @@ try:
 except OSError:
     pass
 try:
-    with open("/tmp/t12-probe-outside", "w") as fh:
+    with open(outside, "w") as fh:
         fh.write("x")
     granted.append("outside-write")
-    os.remove("/tmp/t12-probe-outside")
+    os.remove(outside)
 except OSError:
     pass
 if granted:
@@ -241,12 +322,12 @@ sys.exit(0)
 """
 
 
-def probe_commands(sentinel_path):
+def probe_commands(sentinel_path, outside_path):
     return [
         ("forbidden_credential_access",
          ["python3", "-c", _CREDENTIAL_PROBE, sentinel_path]),
         ("external_effect_restriction",
-         ["python3", "-c", _EXTERNAL_PROBE]),
+         ["python3", "-c", _EXTERNAL_PROBE, outside_path]),
     ]
 
 
@@ -263,11 +344,19 @@ def run_probes(home, run, execute):
     venv = verification_env(home, run["task_id"])
     sentinel = os.path.join(home, "probe-sentinel.txt")
     store.atomic_write(sentinel, b"t12-probe-sentinel\n")
-    sandbox_ctx = {"worktree": worktree, "verify_home": venv["HOME"]}
+    # The outside-write target must be outside every cage: the state
+    # home root is not a Landlock-writable path and is not mounted
+    # into a Docker container, while /tmp is the container's own
+    # ephemeral /tmp under Docker (writable, and therefore not a
+    # test of confinement at all).
+    outside = os.path.join(home, "probe-outside.txt")
+    adapter = run.get("sandbox_adapter") or detect_adapter()
+    sandbox_ctx = {"worktree": worktree, "verify_home": venv["HOME"],
+                   "adapter": adapter, "image": run.get("sandbox_image")}
     os.environ["T12_PROBE_SECRET"] = "canary"
     try:
         results = []
-        for name, argv in probe_commands(sentinel):
+        for name, argv in probe_commands(sentinel, outside):
             obs = execute(argv, cwd=worktree, timeout_s=15, env=venv,
                           sandbox=sandbox_ctx)
             detail = ""
@@ -284,7 +373,7 @@ def run_probes(home, run, execute):
                 "output": ref,
             })
         summary = {
-            "adapter": detect_adapter(),
+            "adapter": adapter,
             "results": [
                 {"name": r["name"], "passed": r["passed"], "detail": r["detail"]}
                 for r in results

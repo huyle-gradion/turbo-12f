@@ -10,6 +10,8 @@ import sys
 import tempfile
 import unittest
 
+from t12 import sandbox
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(ROOT, "bin", "t12")
 
@@ -81,8 +83,10 @@ class CliCase(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"git {' '.join(args)}: {result.stderr}")
         return result.stdout.strip()
 
-    def t12(self, *args, expect=0):
+    def t12(self, *args, expect=0, extra_env=None):
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run(
             [BIN, *args], capture_output=True, text=True, timeout=120, env=env
         )
@@ -684,6 +688,172 @@ class CliCase(unittest.TestCase):
         self.t12("green", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.phase(), "local-verified")
 
+
+
+class DockerCase(unittest.TestCase):
+    """Docker adapter end-to-end against the fake docker stub. The
+    stub emulates the daemon (and stands in for the container's
+    confinement with a Landlock cage); real Docker verification
+    happens on a machine with Docker installed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self.tmp.name, "product")
+        self.home = os.path.join(self.tmp.name, "state")
+        os.makedirs(os.path.join(self.repo, "tests"))
+        self._git(self.repo, "init", "-b", "main", "-q")
+        self._git(self.repo, "config", "user.email", "t@example.com")
+        self._git(self.repo, "config", "user.name", "T")
+        with open(os.path.join(self.repo, "app.py"), "w") as fh:
+            fh.write(APP_V1)
+        open(os.path.join(self.repo, "tests", "__init__.py"), "w").close()
+        self._git(self.repo, "add", ".")
+        self._git(self.repo, "commit", "-qm", "init")
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(bindir)
+        stub = os.path.join(bindir, "docker")
+        with open(os.path.join(os.path.dirname(__file__), "fake_docker.py"), "rb") as src:
+            with open(stub, "wb") as dst:
+                dst.write(src.read())
+        os.chmod(stub, 0o755)
+        self.log_path = os.path.join(self.tmp.name, "docker.log")
+        self.docker_env = {
+            "PATH": bindir + ":" + os.environ["PATH"],
+            "FAKE_DOCKER_ROOT": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "FAKE_DOCKER_LOG": self.log_path,
+            "GITHUB_TOKEN": "canary-secret-value",
+        }
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _git(self, cwd, *args):
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def dt12(self, *args, expect=0, extra_env=None):
+        env = dict(self.docker_env)
+        if extra_env:
+            env.update(extra_env)
+        return self.t12(*args, expect=expect, extra_env=env)
+
+    def t12(self, *args, expect=0, extra_env=None):
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        if extra_env:
+            env.update(extra_env)
+        result = subprocess.run(
+            [BIN, *args], capture_output=True, text=True, timeout=120, env=env)
+        self.assertEqual(result.returncode, expect,
+                         f"t12 {' '.join(args)} -> {result.returncode}: {result.stdout} {result.stderr}")
+        return result
+
+    def docker_log(self):
+        if not os.path.exists(self.log_path):
+            return []
+        with open(self.log_path) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def prepare_task(self, task_id, image=None, extra_env=None):
+        task = task_dict(task_id=task_id)
+        task["sandbox_adapter"] = "docker"
+        if image:
+            task["sandbox_image"] = image
+        task_path = os.path.join(self.tmp.name, f"task-{task_id}.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.dt12("init", "--repo", self.repo, "--home", self.home)
+        self.dt12("prepare", "--home", self.home, "--task", task_path,
+                  extra_env=extra_env)
+        return os.path.join(self.home, "worktrees", task_id)
+
+    def run_to_verified(self, task_id):
+        wt = os.path.join(self.home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.dt12("red", "--home", self.home, "--task-id", task_id,
+                  "--test-path", "tests/test_greet.py",
+                  "--command", "python3 -m unittest tests.test_greet -q",
+                  "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "add", ".")
+        self._git(wt, "commit", "-m", "feat: implement greet")
+        self.dt12("stage", "--home", self.home, "--task-id", task_id,
+                  "--session", "sess-builder")
+        self.dt12("gate", "--home", self.home, "--task-id", task_id,
+                  "--name", "unit", "--session", "sess-qa")
+        self.dt12("replay", "--home", self.home, "--task-id", task_id)
+        report = os.path.join(self.tmp.name, f"review-{task_id}.md")
+        with open(report, "w") as fh:
+            fh.write("Verdict: approve\n")
+        self.dt12("review", "--home", self.home, "--task-id", task_id,
+                  "--role", "reviewer", "--session", "sess-reviewer",
+                  "--verdict", "approve", "--report", report)
+        self.dt12("green", "--home", self.home, "--task-id", task_id)
+        self.dt12("manifest", "--home", self.home, "--task-id", task_id)
+
+    def test_docker_end_to_end(self):
+        if not sandbox.landlock_available():
+            self.skipTest("fake docker stands in for confinement with Landlock")
+        wt = self.prepare_task("demo-docker", image="python:3.12-slim")
+        self.run_to_verified("demo-docker")
+        with open(os.path.join(self.home, "runs", "demo-docker.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["sandbox_adapter"], "docker")
+        self.assertEqual(run["sandbox_image"], "python:3.12-slim")
+        self.assertTrue(sandbox.probes_passed(run["probes"]))
+        with open(os.path.join(self.home, "evidence", "demo-docker", "probes.json")) as fh:
+            self.assertEqual(json.load(fh)["adapter"], "docker")
+        out = self.dt12("status", "--home", self.home, "--task-id", "demo-docker").stdout
+        status = json.loads(out)
+        self.assertEqual(status["phase"], "local-verified")
+        self.assertEqual(status["sandbox_adapter"], "docker")
+        self.assertEqual(status["sandbox_image"], "python:3.12-slim")
+        with open(os.path.join(self.home, "evidence", "demo-docker", "manifest.txt")) as fh:
+            self.assertIn("docker (image python:3.12-slim)", fh.read())
+        log = self.docker_log()
+        runs = [entry for entry in log if entry[:1] == ["run"]]
+        self.assertTrue(runs, "no docker run invocations recorded")
+        for entry in runs:
+            self.assertIn("--network", entry)
+            self.assertEqual(entry[entry.index("--network") + 1], "none")
+            self.assertIn(f"{wt}:{wt}:rw", entry)
+            self.assertIn("python:3.12-slim", entry)
+        flat = " ".join(" ".join(entry) for entry in log)
+        self.assertNotIn("canary-secret-value", flat)
+
+    def test_docker_image_defaults(self):
+        wt = self.prepare_task("demo-default")
+        with open(os.path.join(self.home, "runs", "demo-default.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["sandbox_adapter"], "docker")
+        self.assertEqual(run["sandbox_image"], "python:3.12-slim")
+
+    def test_docker_daemon_down_refuses_prepare(self):
+        task = task_dict(task_id="demo-down")
+        task["sandbox_adapter"] = "docker"
+        task_path = os.path.join(self.tmp.name, "task-demo-down.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.dt12("init", "--repo", self.repo, "--home", self.home)
+        result = self.dt12("prepare", "--home", self.home, "--task", task_path,
+                           expect=1, extra_env={"FAKE_DOCKER_INFO_OK": "0"})
+        self.assertIn("Docker is unavailable", result.stderr)
+
+    def test_docker_missing_image_refuses_prepare(self):
+        task = task_dict(task_id="demo-noimg")
+        task["sandbox_adapter"] = "docker"
+        task["sandbox_image"] = "missing:latest"
+        task_path = os.path.join(self.tmp.name, "task-demo-noimg.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.dt12("init", "--repo", self.repo, "--home", self.home)
+        result = self.dt12("prepare", "--home", self.home, "--task", task_path,
+                           expect=1,
+                           extra_env={"FAKE_DOCKER_IMAGE_MISSING": "missing:latest"})
+        self.assertIn("not present locally", result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

@@ -124,6 +124,17 @@ hashed at admission; `green` refuses if the recorded config changed.
 Set `"require_probes": true` to hard-gate red/gate/replay on passing
 safety probes (see `bin/t12 probe`).
 
+Verification commands run sandboxed. By default the adapter is
+auto-detected (Landlock on Linux, `sandbox-exec` on macOS, none
+otherwise). A task may request `"sandbox_adapter": "docker"` (or the
+operator sets `T12_SANDBOX_ADAPTER=docker`): verification then runs
+as `docker run --rm --network none` with the worktree and
+verify-home mounted and only the verification env passed in. The
+image comes from `"sandbox_image"` (default `python:3.12-slim`, or
+`T12_SANDBOX_IMAGE`) and must already be present locally —
+`prepare` refuses when the Docker daemon does not answer or the
+image is missing, so there are no implicit pulls mid-run.
+
 Budgets (`time_limit_s`, `op_limit`, `repair_cap`) are optional in
 the task file. When omitted, `prepare` uses `limits.json` in the
 state home if `t12 calibrate --apply` has written one, else the

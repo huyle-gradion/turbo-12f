@@ -250,6 +250,28 @@ Enforced by the core, deterministically:
   connect anywhere, while normal commands in the worktree are
   unaffected. Git operations (commit, stage, worktree management)
   run outside the cage so the factory can still record evidence.
+- **Docker adapter.** A task may request `"sandbox_adapter":
+  "docker"` (or the operator sets `T12_SANDBOX_ADAPTER=docker`);
+  verification commands then run as `docker run --rm --network none`
+  with the worktree and the verify-home mounted at their host paths,
+  `--user` set to the host uid/gid (so files created in the worktree
+  are owned by the host user), and only the verification env passed
+  as `-e` flags — never the host's environment, so no secret can
+  ride in. The container env adds two factory-controlled values:
+  `GIT_ALLOW_PROTOCOL=none` and `PYTHONDONTWRITEBYTECODE=1` (without
+  the latter, the verification commands themselves dirty the
+  worktree with `__pycache__` and green refuses). The image comes
+  from the task's `"sandbox_image"` (default `python:3.12-slim`, or
+  `T12_SANDBOX_IMAGE`); it must already be present locally —
+  `prepare` refuses when the daemon does not answer or the image is
+  missing, so there are no implicit pulls mid-run. The adapter is
+  chosen at admission and recorded on the run; every verification
+  command and every probe uses that adapter, and the manifest lists
+  it with the image. Added 2026-11-11; tested here against a fake
+  `docker` stub (`tests/fake_docker.py`) because this machine has
+  no Docker — the stub emulates the daemon and stands in for the
+  container's confinement with a Landlock cage. Real end-to-end
+  verification needs a machine with Docker installed.
 
 Measured, not asserted — the probes:
 
@@ -261,9 +283,13 @@ Measured, not asserted — the probes:
   (`probe-<name>-output.txt`, `probes.json`); a granted access fails
   the probe and is reported, not hidden.
 - **Adapter detection.** `landlock` on Linux with a new-enough
-  kernel, `sandbox-exec` detected on macOS but not enforced there
-  (unverified), `none` otherwise. When no adapter is available,
-  verification runs unwrapped and the probes record the gap.
+  kernel, `docker` when the task or environment requests it and the
+  daemon answers, `sandbox-exec` detected on macOS but not enforced
+  there (unverified), `none` otherwise. When no adapter is available,
+  verification runs unwrapped and the probes record the gap. The
+  probes' outside-write target is the state home root (not `/tmp`):
+  `/tmp` is the container's own ephemeral directory under Docker,
+  so writing it would not test confinement at all.
 - **Opt-in hard gate.** A task may set `"require_probes": true`;
   then red, gate, and replay refuse until probes have passed for
   the run, and `prepare` stops the run if probes fail at admission.
@@ -490,7 +516,7 @@ t12/
   evidence.py            sha256 refs, re-hash verification, provenance
   gates.py               ordered gate ladder, repair cap
   limits.py              budget reporting, p90 calibration, limits.json
-  sandbox.py             forbidden flags, credential stripping, Landlock cage, probes
+  sandbox.py             forbidden flags, credential stripping, Landlock cage, Docker adapter, probes
   errors.py
 prompts/                 owned prompts, versioned (Factor 2)
 skills/                  orchestrator, builder, reviewer, qa, security (super-board roles)
