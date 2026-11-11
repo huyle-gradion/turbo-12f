@@ -13,7 +13,7 @@ import shlex
 import sys
 import time
 
-from . import evidence, gates as gate_mod, gitio, model, runner, sandbox, store
+from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -161,6 +161,12 @@ def _manifest_text(run):
         f"budgets: time {b['time_limit_s']}s, ops {b['ops_used']}/{b['op_limit']}, "
         f"repairs {b['repairs_used']}/{b['repair_cap']}"
     )
+    if run.get("measurements"):
+        m = run["measurements"]
+        lines.append(
+            f"measured: wall {m['wall_used_s']}s, ops {m['ops_used']}, "
+            f"repairs {m['repairs_used']}, gates {m['gates']}"
+        )
     if run["stop_reason"]:
         lines.append(f"stop reason: {run['stop_reason']}")
     lines.append("")
@@ -233,7 +239,10 @@ def cmd_prepare(args):
         gitio.remove_worktree_force(repo, old["worktree"])
         if gitio.branch_exists(repo, old["branch"]):
             gitio.delete_branch(repo, old["branch"])
-    run = model.new_run(task, repo, home, supersedes=supersedes)
+    calibrated = limits.load_limits(home)
+    run = model.new_run(task, repo, home, supersedes=supersedes,
+                        defaults=calibrated,
+                        defaults_source="calibrated" if calibrated else "builtin")
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base)
@@ -405,6 +414,7 @@ def cmd_gate(args):
         if run["budgets"]["repairs_used"] > run["budgets"]["repair_cap"]:
             run["phase"] = "stopped"
             run["stop_reason"] = "repair-cap"
+            model.record_measurements(run)
             _save(home, run, "stopped", {"reason": "repair-cap"})
             raise StateError(
                 f"gate {gate['name']!r} failed and the repair cap "
@@ -481,6 +491,7 @@ def cmd_green(args):
     evidence.verify_green(home, run)
     model.bump_op(run)
     model.transition(run, "local-verified")
+    model.record_measurements(run)
     manifest = _manifest_text(run)
     ref = evidence.write_evidence(home, run["task_id"], "manifest.txt", manifest.encode())
     run["manifest"] = ref
@@ -702,6 +713,39 @@ def cmd_resume(args):
     return 0
 
 
+def cmd_report(args):
+    home = _home(args)
+    data = limits.collect(home)
+    recommendation = limits.recommend(data["completed"])
+    if args.json:
+        print(json.dumps(
+            {"home": home, "report": data, "recommendation": recommendation},
+            indent=2, sort_keys=True, default=str))
+    else:
+        print(limits.report_text(home, data, recommendation), end="")
+    return 0
+
+
+def cmd_calibrate(args):
+    home = _home(args)
+    data = limits.collect(home)
+    recommendation = limits.recommend(data["completed"])
+    if recommendation is None:
+        print(f"not enough data: {len(data['completed'])} completed runs, "
+              f"need at least {limits.MIN_SAMPLE}")
+        return 1
+    print(limits.report_text(home, data, recommendation), end="")
+    if args.apply:
+        saved = limits.save_limits(home, recommendation)
+        print(f"wrote {limits.limits_path(home)}: "
+              f"time_limit_s={saved['time_limit_s']} "
+              f"op_limit={saved['op_limit']} "
+              f"repair_cap={saved['repair_cap']}")
+    else:
+        print("dry run: re-run with --apply to write limits.json")
+    return 0
+
+
 def cmd_probe(args):
     home = _home(args)
     run = _run(home, args.task_id)
@@ -724,6 +768,7 @@ def cmd_stop(args):
         raise StateError(f"cannot stop from phase {run['phase']!r}")
     run["stop_reason"] = args.reason
     model.transition(run, "stopped")
+    model.record_measurements(run)
     _save(home, run, "stopped", {"reason": args.reason})
     print(f"stopped: task={run['task_id']} — {args.reason}")
     return 0
@@ -785,6 +830,15 @@ def build_parser():
 
     p = sub.add_parser("verify"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("report"); p.add_argument("--home", required=True)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_report)
+
+    p = sub.add_parser("calibrate"); p.add_argument("--home", required=True)
+    p.add_argument("--apply", action="store_true",
+                   help="write the recommended defaults to limits.json")
+    p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("status"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_status)

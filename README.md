@@ -65,6 +65,8 @@ merge — a human merges.
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |
+| `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
+| `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk |
 | `stop` | Stop a run explicitly with a reason (terminal; use `--supersede` to start over) |
@@ -91,6 +93,12 @@ Gate commands are argv arrays, never shell strings. The task file is
 hashed at admission; `green` refuses if the recorded config changed.
 Set `"require_probes": true` to hard-gate red/gate/replay on passing
 safety probes (see `bin/t12 probe`).
+
+Budgets (`time_limit_s`, `op_limit`, `repair_cap`) are optional in
+the task file. When omitted, `prepare` uses `limits.json` in the
+state home if `t12 calibrate --apply` has written one, else the
+built-ins (3600s / 100 ops / 3 repairs). The run records which
+source applied (`budget_source`).
 
 ## Tests
 

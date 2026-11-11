@@ -417,6 +417,93 @@ class CliCase(unittest.TestCase):
         result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
         self.assertIn("FAIL manifest", result.stdout)
 
+    def run_to_verified(self, task_id):
+        task_path = os.path.join(self.tmp.name, f"task-{task_id}.json")
+        with open(task_path, "w") as fh:
+            json.dump(task_dict(task_id=task_id), fh)
+        self.t12("prepare", "--home", self.home, "--task", task_path)
+        wt = os.path.join(self.home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", task_id,
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "add", ".")
+        self._git(wt, "commit", "-m", "feat: implement greet")
+        self.t12("stage", "--home", self.home, "--task-id", task_id)
+        self.t12("gate", "--home", self.home, "--task-id", task_id, "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", task_id)
+        self.t12("green", "--home", self.home, "--task-id", task_id)
+
+    def test_measurements_recorded_at_green(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        with open(os.path.join(self.home, "runs", "demo-1.json")) as fh:
+            run = json.load(fh)
+        m = run["measurements"]
+        self.assertIsNotNone(m)
+        self.assertGreater(m["wall_used_s"], 0)
+        self.assertEqual(m["ops_used"], 5)
+        self.assertEqual(m["repairs_used"], 0)
+        self.assertEqual(m["gates"], 1)
+        self.assertEqual(run["budget_source"], "task")
+
+    def test_calibrate_refuses_with_too_few_runs(self):
+        result = self.t12("calibrate", "--home", self.home, expect=1)
+        self.assertIn("need at least 3", result.stdout)
+        result = self.t12("report", "--home", self.home)
+        self.assertIn("not enough data", result.stdout)
+
+    def test_report_and_calibrate_end_to_end(self):
+        for task_id in ("r1", "r2", "r3"):
+            self.run_to_verified(task_id)
+        result = self.t12("report", "--home", self.home)
+        self.assertIn("3 verified", result.stdout)
+        self.assertIn("calibration: from 3 completed runs", result.stdout)
+        result = self.t12("calibrate", "--home", self.home)
+        self.assertIn("recommended defaults", result.stdout)
+        self.assertIn("dry run", result.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "limits.json")))
+        result = self.t12("calibrate", "--home", self.home, "--apply")
+        self.assertIn("wrote", result.stdout)
+        with open(os.path.join(self.home, "limits.json")) as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["time_limit_s"], 600)
+        self.assertEqual(saved["op_limit"], 20)
+        self.assertEqual(saved["repair_cap"], 2)
+        self.assertEqual(saved["calibrated_from"]["runs"], 3)
+        # A task without budgets now inherits the calibrated defaults.
+        task = task_dict(task_id="r4")
+        for key in ("time_limit_s", "op_limit", "repair_cap"):
+            del task[key]
+        task_path = os.path.join(self.tmp.name, "task-r4.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.t12("prepare", "--home", self.home, "--task", task_path)
+        with open(os.path.join(self.home, "runs", "r4.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["budgets"]["time_limit_s"], 600)
+        self.assertEqual(run["budgets"]["op_limit"], 20)
+        self.assertEqual(run["budgets"]["repair_cap"], 2)
+        self.assertEqual(run["budget_source"], "calibrated")
+        # A task with explicit budgets keeps them.
+        task = task_dict(task_id="r5", gates=None)
+        task["time_limit_s"] = 123
+        task_path = os.path.join(self.tmp.name, "task-r5.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        self.t12("prepare", "--home", self.home, "--task", task_path)
+        with open(os.path.join(self.home, "runs", "r5.json")) as fh:
+            run = json.load(fh)
+        self.assertEqual(run["budgets"]["time_limit_s"], 123)
+        self.assertEqual(run["budget_source"], "task")
+
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
         self.write_worktree("app.py", APP_WRONG)  # close, but still failing

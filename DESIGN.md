@@ -318,6 +318,44 @@ rewrite by the machine's owner. That is the honest boundary:
 tamper-evidence for accidents and for a compromised worker, not
 tamper-proofing against the operator.
 
+## Limits (Phase 5)
+
+The built-in defaults (3600s, 100 ops, 3 repairs) were guesses.
+Phase 5 replaces guessing with measurement:
+
+- **Measurements at terminal transitions.** When a run reaches
+  `local-verified`, is stopped, or stops on the repair cap, the
+  record snapshots what it actually used: wall time, ops, repairs,
+  gate count. The manifest shows the measured usage next to the
+  budget. A run without measurements cannot calibrate anything and
+  is reported as such.
+- **`t12 report` — budget reporting.** Per-run usage vs budget,
+  cap hits (repairs / ops / time), and aggregates over completed
+  runs. `--json` prints the same structure for scripts.
+- **`t12 calibrate` — defaults from real runs.** From completed
+  runs only (`local-verified` with measurements): the recommended
+  default for each budget is the p90, rounded up to a sane step
+  (60s / 5 ops / 1 repair), never below a floor (600s / 20 ops /
+  2 repairs). Fewer than 3 completed runs, and it refuses — one
+  toy run must not set the defaults. Runs stopped by the repair
+  cap are censored: their true need is unknown, so they are listed
+  as excluded rather than folded into the numbers. Dry run by
+  default; `--apply` writes `limits.json` with the recommendation
+  and its provenance (sample size, stats, time).
+- **Precedence, recorded.** A task's own budgets always win;
+  calibrated defaults from `limits.json` apply when the task omits
+  a budget; built-ins are the last resort. The run record stores
+  `budget_source` (`task` / `calibrated` / `builtin`) so any run
+  can say where its limits came from. A malformed `limits.json`
+  fails `prepare` closed rather than being silently ignored.
+
+What this does not do: it does not auto-tune anything. Calibration
+is an explicit operator act (`calibrate --apply`), and the
+recommendation is a starting point the operator can edit — the
+file is plain JSON. Limits are per state home, not per product:
+different products' runs should live in different state homes if
+their shapes differ.
+
 ## Layout
 
 ```text
@@ -391,7 +429,15 @@ examples/                a sample task file
    `resume` refuse on a broken chain; manifest issuance is itself a
    recorded event. No signing key: the chain detects edits, it does
    not prevent a full rewrite by the machine's owner.
-5. **Limits** — calibrated defaults from real runs, budget reporting.
+5. **Limits — DONE 2026-11-11.** Measurements are recorded at
+   every terminal transition (wall time, ops, repairs, gates).
+   `t12 report` shows per-run usage vs budget, cap hits, and
+   aggregates; `t12 calibrate` recommends defaults from the p90 of
+   completed runs (floors: 600s / 20 ops / 2 repairs; minimum
+   sample 3; repair-cap-stopped runs censored, not folded in) and
+   writes them to `limits.json` with `--apply`. `prepare` uses a
+   task's own budgets first, calibrated defaults next, built-ins
+   last, and records which source applied.
 6. **Roles** — builder / test-writer / QA / security / reviewer as
    separate worker invocations with their own prompts, worktrees,
    and evidence; review loop with prior-report memory.

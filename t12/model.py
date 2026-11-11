@@ -8,6 +8,7 @@ import json
 import os
 import time
 
+from . import limits as limits_mod
 from . import store
 from .errors import BudgetError, StateError
 
@@ -52,8 +53,33 @@ def evidence_dir(home, task_id):
     return os.path.join(home, "evidence", task_id)
 
 
-def new_run(task, repo, home, supersedes=None):
+def record_measurements(run):
+    """Snapshot what a run actually used, at a terminal transition.
+    Calibration reads these; a run without measurements cannot
+    calibrate anything and is reported as such."""
+    budgets = run["budgets"]
+    run["measurements"] = {
+        "wall_used_s": round(time.time() - budgets["started_at"], 1),
+        "ops_used": budgets["ops_used"],
+        "repairs_used": budgets["repairs_used"],
+        "gates": len(run["gates"]),
+        "finished_at": time.time(),
+    }
+    return run["measurements"]
+
+
+def new_run(task, repo, home, supersedes=None, defaults=None,
+            defaults_source="builtin"):
     now = time.time()
+    defaults = defaults or limits_mod.BUILTIN_DEFAULTS
+    budget_source = defaults_source
+    limits = {}
+    for key in limits_mod.KEYS:
+        if key in task:
+            limits[key] = int(task[key])
+            budget_source = "task"
+        else:
+            limits[key] = int(defaults.get(key, limits_mod.BUILTIN_DEFAULTS[key]))
     gates = []
     for g in task.get("gates", []):
         if not isinstance(g.get("command"), list) or not g["command"]:
@@ -81,13 +107,15 @@ def new_run(task, repo, home, supersedes=None):
         "created_at": now,
         "config_digest": store.sha256_bytes(store.canonical_json(task)),
         "budgets": {
-            "time_limit_s": int(task.get("time_limit_s", 3600)),
-            "op_limit": int(task.get("op_limit", 100)),
-            "repair_cap": int(task.get("repair_cap", 3)),
+            "time_limit_s": limits["time_limit_s"],
+            "op_limit": limits["op_limit"],
+            "repair_cap": limits["repair_cap"],
             "started_at": now,
             "ops_used": 0,
             "repairs_used": 0,
         },
+        "budget_source": budget_source,
+        "measurements": None,
         "gates": gates,
         "red": None,
         "candidate": None,
