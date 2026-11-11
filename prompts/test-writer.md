@@ -22,8 +22,17 @@ context below. The test must:
 When you are done, write a JSON result to stdout:
 
 ```json
-{"tool": "red_test_ready", "args": {"test_path": "tests/test_x.py"}}
+{"tool": "red_test_ready", "args": {
+  "test_path": "tests/test_x.py",
+  "command": ["python3", "-m", "pytest", "tests/test_x.py", "-q"],
+  "marker": "FAILED"
+}}
 ```
+
+`command` is the exact argv that runs your test (a list, never a
+shell string). `marker` is text that appears in its output when the
+test fails. The factory commits the test, runs `command` on that
+commit, and refuses unless it fails with `marker` in the output.
 
 If you cannot write a failing test — the criterion is untestable, or
 it already passes — do NOT fake a failure. Return instead:

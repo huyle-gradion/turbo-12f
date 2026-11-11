@@ -35,6 +35,21 @@ who owns the fix), the verification command you ran and its result,
 and anything you could not check. `changes-requested` means a
 Blocker exists or something material is unverified.
 
+When the host collects your output as a tool call (`t12 act`),
+return the same report as one JSON object instead:
+
+```json
+{"tool": "review", "args": {
+  "verdict": "merge-ready | blocked | human-gated | unverified",
+  "findings": [{"id": "S1", "class": "Secret", "severity": "Blocker",
+                "where": "src/x.py:12", "finding": "...", "owner": "builder"}],
+  "verification": "<exact command you ran and its result>"
+}}
+```
+
+`merge-ready` records `approve`; any other verdict records
+`changes-requested`.
+
 ## Verdict mapping
 
 Your report's verdict is what the factory records. `approve` lets
