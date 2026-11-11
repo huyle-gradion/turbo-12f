@@ -11,14 +11,17 @@ enforces; this file states what it does *not* claim.
 - **Candidate**: the commit `stage` pinned. A new commit is a new
   candidate; verification bound to the old one does not carry over.
 - **Gate**: one ordered check from the task file. A later gate cannot
-  run until the prior gate passed on the same candidate.
+  run until the prior gate passed on the same candidate. Gates and
+  replay run only on a clean worktree at the candidate commit, and
+  each gate records the commit it ran on.
 - **local-verified**: the configured evidence chain was observed and
   remains internally consistent. Not QC approval, not product
   acceptance, not permission to merge.
 - **Worker**: an LLM invocation for one role on one task. The worker
   is replaceable; the policy/evidence engine is the durable part.
 - **Host adapter**: code that calls a model, a tracker, or a forge.
-  None exists in Phase 1. The core never imports one.
+  Adapters live in `adapters/` and report back through `t12 deliver`;
+  the core never imports one.
 
 ## What this does not claim
 

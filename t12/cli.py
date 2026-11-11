@@ -56,6 +56,15 @@ def _check_worktree(run):
     return wt
 
 
+def _check_candidate_tree(run, action):
+    wt = _check_worktree(run)
+    if not gitio.is_clean(wt):
+        raise StateError(f"refusing {action}: worktree has uncommitted changes")
+    if gitio.head(wt) != run["candidate"]["commit"]:
+        raise StateError(f"refusing {action}: HEAD moved since stage")
+    return wt
+
+
 def _time_left(run):
     left = int(model.time_left_s(run))
     if left <= 0:
@@ -422,7 +431,7 @@ def cmd_gate(args):
     model.check_budgets(run)
     _require_probes(run)
     model.check_session(run, "qa", args.session)
-    wt = _check_worktree(run)
+    wt = _check_candidate_tree(run, "gate")
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
     env, ctx = _verification(home, run)
@@ -430,6 +439,7 @@ def cmd_gate(args):
                      env=env, sandbox=ctx)
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
+    gate["commit"] = run["candidate"]["commit"]
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
         gate["status"] = "failed"
@@ -473,9 +483,7 @@ def cmd_replay(args):
         raise StateError("replay requires all gates to pass first")
     model.check_budgets(run)
     _require_probes(run)
-    wt = _check_worktree(run)
-    if gitio.head(wt) != run["candidate"]["commit"]:
-        raise StateError("refusing replay: HEAD moved since stage")
+    wt = _check_candidate_tree(run, "replay")
     env, ctx = _verification(home, run)
     obs = runner.run(run["red"]["command"], cwd=wt, timeout_s=_time_left(run),
                      env=env, sandbox=ctx)

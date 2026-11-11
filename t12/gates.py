@@ -39,3 +39,4 @@ def reset_for_new_candidate(run):
     for gate in run["gates"]:
         gate["status"] = "pending"
         gate["observation"] = None
+        gate["commit"] = None

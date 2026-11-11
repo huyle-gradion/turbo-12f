@@ -84,6 +84,8 @@ def verify_green(home, run):
     for gate in run["gates"]:
         if gate["status"] != "passed" or not gate["observation"]:
             raise EvidenceError(f"gate {gate['name']!r} has not passed on this candidate")
+        if gate.get("commit") != run["candidate"]["commit"]:
+            raise EvidenceError(f"gate {gate['name']!r} was not run on the candidate")
         verify_ref(home, task_id, gate["observation"])
         gate_obs = gate["observation"].get("observation", {})
         if gate_obs.get("exit_code") != 0 or gate_obs.get("timed_out"):
