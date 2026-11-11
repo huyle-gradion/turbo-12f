@@ -265,10 +265,11 @@ POLICY_PATH = ".t12/policy.json"
 
 def security_paths(policy_text):
     """Paths whose change requires a security review, from the policy
-    file as it stands on the base commit. The policy file itself is
-    always one of them, so a candidate cannot quietly drop an entry."""
+    file as it stands on the base commit. The policy folder is always
+    one of them, so a candidate can neither drop an entry nor add the
+    first policy without a security review."""
     if policy_text is None:
-        return []
+        return [os.path.dirname(POLICY_PATH)]
     try:
         paths = json.loads(policy_text).get("security_review_paths", [])
     except (ValueError, AttributeError) as exc:
