@@ -174,9 +174,9 @@ pointer, not as a Dex citation.)
   (accessibility), `antislop-layoutmobile`, `antislop-code`.
 - **When it applies:** any task whose deliverable is TypeScript code
   or UI — which is the likely shape of product work here (TypeScript
-  on Node, React + TypeScript with Vite+ for UI/tests, Tauri 2
-  shell). The Python core of turbo-12f itself does not need it; the
-  factory's product work does.
+  on Node, React + TypeScript with Vite+ for UI/tests, Electron
+  shell for Chat Bridge). The Python core of turbo-12f itself does
+  not need it; the factory's product work does.
 - **How it runs:** two modes — `during` (rules guide the build, the
   session closes with the Delivery Gate report) and `after` (audit
   existing work, numbered findings, fix what the human approves).
