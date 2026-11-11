@@ -60,7 +60,11 @@ def verify_ref(home, task_id, ref):
 
 
 def verify_green(home, run):
-    """Re-validate the whole chain before certifying. Raises on any gap."""
+    """Re-validate the whole chain before certifying. Raises on any gap.
+
+    Hashes alone do not prove a gate passed: a flipped status with a
+    failing observation file would still hash. So the recorded exit
+    codes must also tell the same story as the statuses."""
     task_id = run["task_id"]
     if run["phase"] != "green":
         raise EvidenceError(f"green requires phase 'green', run is {run['phase']!r}")
@@ -70,10 +74,22 @@ def verify_green(home, run):
         raise EvidenceError("green requires replay evidence")
     if not run["candidate"]:
         raise EvidenceError("green requires a staged candidate")
+    red_obs = run["red"]["output"].get("observation", {})
+    if run["red"]["exit_code"] == 0 or red_obs.get("exit_code") != run["red"]["exit_code"]:
+        raise EvidenceError("red evidence does not show a failing test")
+    if run["replay"]["exit_code"] != 0:
+        raise EvidenceError("replay evidence does not show a passing test")
+    if run["replay"]["commit"] != run["candidate"]["commit"]:
+        raise EvidenceError("replay was not run on the candidate")
     for gate in run["gates"]:
         if gate["status"] != "passed" or not gate["observation"]:
             raise EvidenceError(f"gate {gate['name']!r} has not passed on this candidate")
         verify_ref(home, task_id, gate["observation"])
+        gate_obs = gate["observation"].get("observation", {})
+        if gate_obs.get("exit_code") != 0 or gate_obs.get("timed_out"):
+            raise EvidenceError(
+                f"gate {gate['name']!r} is marked passed but its observation failed or timed out"
+            )
     verify_ref(home, task_id, run["red"]["output"])
     verify_ref(home, task_id, run["replay"]["output"])
     return True

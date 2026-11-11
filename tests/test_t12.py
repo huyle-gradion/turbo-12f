@@ -314,6 +314,109 @@ class CliCase(unittest.TestCase):
                           expect=1)
         self.assertIn("safety probes have not passed", result.stderr)
 
+    def test_verify_passes_on_happy_path(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.t12("manifest", "--home", self.home, "--task-id", "demo-1")
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1")
+        for name in ("event-chain", "evidence-refs", "exit-codes", "worktree", "manifest"):
+            self.assertIn(f"PASS {name}", result.stdout)
+
+    def test_verify_fails_on_tampered_run_record(self):
+        self.do_red()
+        run_path = os.path.join(self.home, "runs", "demo-1.json")
+        with open(run_path) as fh:
+            run = json.load(fh)
+        run["title"] = "tampered title"
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("FAIL event-chain", result.stdout)
+        self.assertIn("state digest", result.stdout)
+
+    def test_verify_fails_on_tampered_event_log(self):
+        self.do_red()
+        events_path = os.path.join(self.home, "runs", "demo-1.events.jsonl")
+        with open(events_path) as fh:
+            lines = fh.readlines()
+        event = json.loads(lines[0])
+        event["detail"] = {"tampered": True}
+        lines[0] = json.dumps(event, sort_keys=True) + "\n"
+        with open(events_path, "w") as fh:
+            fh.writelines(lines)
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("FAIL event-chain", result.stdout)
+
+    def test_green_refuses_tampered_run_record(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        run_path = os.path.join(self.home, "runs", "demo-1.json")
+        with open(run_path) as fh:
+            run = json.load(fh)
+        run["title"] = "tampered title"
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("event log failed verification", result.stderr)
+        self.assertEqual(self.phase(), "green")
+
+    def test_green_refuses_forged_gate(self):
+        # A gate that fails, then a forged "passed" status in the record.
+        with open(self.task_path, "w") as fh:
+            json.dump(task_dict(task_id="demo-fg", gates=[
+                {"name": "unit", "command": ["python3", "-c", "import sys; sys.exit(1)"]},
+            ]), fh)
+        home2 = os.path.join(self.tmp.name, "home-fg")
+        self.t12("init", "--home", home2, "--repo", self.repo)
+        self.t12("prepare", "--home", home2, "--task", self.task_path)
+        wt = os.path.join(home2, "worktrees", "demo-fg")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home2, "--task-id", "demo-fg",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "add", ".")
+        self._git(wt, "commit", "-m", "feat: implement greet")
+        self.t12("stage", "--home", home2, "--task-id", "demo-fg")
+        self.t12("gate", "--home", home2, "--task-id", "demo-fg", "--name", "unit", expect=1)
+        # Forge the pass in the record, then absorb the edit into the
+        # chain with a probe run, so only the exit-code check can catch it.
+        run_path = os.path.join(home2, "runs", "demo-fg.json")
+        with open(run_path) as fh:
+            run = json.load(fh)
+        run["gates"][0]["status"] = "passed"
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        self.t12("probe", "--home", home2, "--task-id", "demo-fg")
+        self.t12("replay", "--home", home2, "--task-id", "demo-fg")
+        result = self.t12("green", "--home", home2, "--task-id", "demo-fg", expect=1)
+        self.assertIn("observation failed or timed out", result.stderr)
+        out = self.t12("status", "--home", home2, "--task-id", "demo-fg").stdout
+        self.assertEqual(json.loads(out)["phase"], "green")
+
+    def test_manifest_tamper_detected(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.t12("manifest", "--home", self.home, "--task-id", "demo-1")
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1")
+        self.assertIn("PASS manifest", result.stdout)
+        manifest = os.path.join(self.home, "evidence", "demo-1", "manifest.txt")
+        with open(manifest, "a") as fh:
+            fh.write("tampered\n")
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("FAIL manifest", result.stdout)
+
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
         self.write_worktree("app.py", APP_WRONG)  # close, but still failing

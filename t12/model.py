@@ -127,18 +127,91 @@ def save_run(home, run):
     store.save_json(run_path(home, run["task_id"]), run)
 
 
+def genesis_prev(task_id):
+    return store.sha256_bytes(f"t12-genesis:{task_id}".encode())
+
+
+def read_events(home, task_id):
+    """Load the event log. Raises StateError on a missing or malformed
+    log — a log that cannot be read cannot be trusted."""
+    path = events_path(home, task_id)
+    if not os.path.exists(path):
+        raise StateError(f"no event log for task {task_id!r}")
+    events = []
+    with open(path, encoding="utf-8") as fh:
+        for lineno, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise StateError(f"event log line {lineno} is not valid JSON: {exc}") from exc
+            if not isinstance(event, dict):
+                raise StateError(f"event log line {lineno} is not an object")
+            events.append(event)
+    return events
+
+
 def append_event(home, run, event_type, detail=None):
+    """Append one event to the hash-chained log and return it.
+
+    Each event links to the previous event's hash, carries its
+    sequence number, and records a digest of the run record as it
+    stands after this command. Editing, deleting, or reordering an
+    event breaks the chain; editing the run record after the last
+    event breaks the state digest. The chain is the audit trail;
+    the run record is the current state."""
+    events = []
+    path = events_path(home, run["task_id"])
+    if os.path.exists(path):
+        events = read_events(home, run["task_id"])
+    prev = events[-1]["hash"] if events else genesis_prev(run["task_id"])
     event = {
+        "seq": len(events) + 1,
         "ts": time.time(),
         "task_id": run["task_id"],
         "phase": run["phase"],
         "type": event_type,
         "detail": detail or {},
+        "prev": prev,
+        "state_sha": store.sha256_bytes(store.canonical_json(run)),
     }
-    path = events_path(home, run["task_id"])
+    event["hash"] = store.sha256_bytes(store.canonical_json(event))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(event, sort_keys=True) + "\n")
+    return event
+
+
+def verify_chain(home, run):
+    """Check the event log against the run record. Returns a list of
+    problems; empty means the log is intact and the run record is
+    exactly what the last event recorded."""
+    problems = []
+    try:
+        events = read_events(home, run["task_id"])
+    except StateError as exc:
+        return [str(exc)]
+    if not events:
+        return ["event log is empty"]
+    prev = genesis_prev(run["task_id"])
+    for index, event in enumerate(events):
+        if event.get("seq") != index + 1:
+            problems.append(f"event {index + 1}: seq is {event.get('seq')}, expected {index + 1}")
+        if event.get("task_id") != run["task_id"]:
+            problems.append(f"event {index + 1}: task_id mismatch")
+        if event.get("prev") != prev:
+            problems.append(f"event {index + 1}: prev link broken")
+        recorded = event.get("hash")
+        content = {k: v for k, v in event.items() if k != "hash"}
+        if recorded != store.sha256_bytes(store.canonical_json(content)):
+            problems.append(f"event {index + 1}: hash mismatch (edited?)")
+        prev = recorded
+    last = events[-1]
+    if last.get("state_sha") != store.sha256_bytes(store.canonical_json(run)):
+        problems.append("run record changed since the last event (state digest mismatch)")
+    return problems
 
 
 def transition(run, to):

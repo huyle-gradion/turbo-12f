@@ -277,6 +277,47 @@ pass under the cage — that is the cage working, and such tests
 belong outside the verification gates or in a task that does not
 run them sandboxed.
 
+## Evidence integrity (Phase 4)
+
+The run record is a plain JSON file, and a plain file can be
+edited. Phase 4 makes edits detectable instead of pretending they
+cannot happen:
+
+- **Hash-chained event log.** Every event carries a sequence
+  number, a link to the previous event's hash, and a digest of the
+  run record as it stood after that command (`state_sha`). Editing,
+  deleting, or reordering an event breaks the chain; editing the
+  run record after the last event breaks the state digest. The
+  first event links to a per-task genesis hash. A corrupted log
+  fails closed: further commands refuse until the run is superseded.
+- **`t12 verify` — the auditor.** Five checks, each PASS/FAIL, exit
+  0 only if all pass: the event chain; every evidence ref re-hashed
+  (red, replay, gate and probe observations); the exit codes (a red
+  must have failed, a replay and every passed gate must have exit
+  0, and the recorded code must agree with the stored observation);
+  HEAD pinned to the expected commit and the red test blob
+  unchanged; the manifest re-hashed against its issued hash.
+- **Certification checks the chain too.** `green` refuses on a
+  broken chain before it looks at any evidence, and `resume`
+  refuses on a broken chain before returning to the prior phase.
+  `verify_green` also checks the exit-code story: a gate flipped
+  to "passed" in the record while its observation shows a failure
+  is refused, and a replay recorded against the wrong commit is
+  refused.
+- **Manifest issuance is recorded.** Writing a manifest appends a
+  `manifest` event with its SHA-256 (or the outside path for
+  `--out`), so a rewritten manifest is detectable against the log.
+  The `green` certification already recorded the manifest hash in
+  its `verified` event.
+
+What this is not: there is no signing key and no external
+notary. Anyone with write access to the state home *and* the
+patience to rewrite the whole chain from genesis can forge a
+history — the chain detects edits, it does not prevent a full
+rewrite by the machine's owner. That is the honest boundary:
+tamper-evidence for accidents and for a compromised worker, not
+tamper-proofing against the operator.
+
 ## Layout
 
 ```text
@@ -339,8 +380,17 @@ examples/                a sample task file
    run at `prepare` and on demand via `t12 probe`, recorded as
    evidence; a task can set `require_probes` to hard-gate
    red/gate/replay on passing probes.
-4. **Evidence integrity** — signed manifests, config digests across
-   runs, tamper drills.
+4. **Evidence integrity — DONE 2026-11-11.** Hash-chained event
+   log: every event links to the previous hash, carries a sequence
+   number, and records a digest of the run record as it stood after
+   that command. `t12 verify` audits the chain, re-hashes every
+   evidence ref, checks the recorded exit codes tell the same story
+   as the statuses (a flipped gate status with a failing
+   observation is refused by `green`), re-pins HEAD/test-blob, and
+   checks the manifest against its issued hash. `green` and
+   `resume` refuse on a broken chain; manifest issuance is itself a
+   recorded event. No signing key: the chain detects edits, it does
+   not prevent a full rewrite by the machine's owner.
 5. **Limits** — calibrated defaults from real runs, budget reporting.
 6. **Roles** — builder / test-writer / QA / security / reviewer as
    separate worker invocations with their own prompts, worktrees,

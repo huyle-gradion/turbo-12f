@@ -77,6 +77,12 @@ def _require_probes(run):
         )
 
 
+def _verify_chain_or_raise(home, run):
+    problems = model.verify_chain(home, run)
+    if problems:
+        raise StateError("event log failed verification: " + "; ".join(problems[:3]))
+
+
 def _last_compacted_error(home, run):
     """Factor 9: the next worker gets a compacted error, not raw logs."""
     path = model.events_path(home, run["task_id"])
@@ -464,6 +470,7 @@ def cmd_green(args):
     if run["phase"] != "green":
         raise StateError(f"green requires phase 'green', run is {run['phase']!r}")
     model.check_budgets(run)
+    _verify_chain_or_raise(home, run)
     wt = _check_worktree(run)
     if not gitio.is_clean(wt):
         raise StateError("refusing green: worktree has uncommitted changes")
@@ -491,12 +498,126 @@ def cmd_manifest(args):
         )
     text = _manifest_text(run)
     if args.out:
-        store.atomic_write(os.path.abspath(args.out), text.encode())
+        out = os.path.abspath(args.out)
+        store.atomic_write(out, text.encode())
+        _save(home, run, "manifest", {"sha256": store.sha256_bytes(text.encode()), "out": out})
         print(f"manifest written to {args.out}")
     else:
         ref = evidence.write_evidence(home, run["task_id"], "manifest.txt", text.encode())
+        _save(home, run, "manifest", {"sha256": ref["sha256"]})
         print(f"manifest written: sha256={ref['sha256'][:16]}")
     return 0
+
+
+def cmd_verify(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    checks = []
+
+    def check(name, ok, detail=""):
+        checks.append((name, ok, detail))
+
+    problems = model.verify_chain(home, run)
+    check("event-chain", not problems, "; ".join(problems[:3]))
+
+    refs = []
+    if run["red"]:
+        refs.append(("red", run["red"]["output"]))
+    if run["replay"]:
+        refs.append(("replay", run["replay"]["output"]))
+    for gate in run["gates"]:
+        if gate["observation"]:
+            refs.append((f"gate:{gate['name']}", gate["observation"]))
+    for probe in run.get("probes") or []:
+        if probe.get("output"):
+            refs.append((f"probe:{probe['name']}", probe["output"]))
+    ref_problems = []
+    for label, ref in refs:
+        try:
+            evidence.verify_ref(home, run["task_id"], ref)
+        except T12Error as exc:
+            ref_problems.append(f"{label}: {exc}")
+    check("evidence-refs", not ref_problems, "; ".join(ref_problems[:3]))
+
+    exit_problems = []
+    if run["red"]:
+        obs = run["red"]["output"].get("observation", {})
+        if run["red"]["exit_code"] == 0:
+            exit_problems.append("red exit_code is 0 (red must fail)")
+        if obs.get("exit_code") != run["red"]["exit_code"]:
+            exit_problems.append("red exit_code disagrees with its observation")
+    if run["replay"]:
+        if run["replay"]["exit_code"] != 0:
+            exit_problems.append("replay exit_code is not 0")
+        if run["candidate"] and run["replay"]["commit"] != run["candidate"]["commit"]:
+            exit_problems.append("replay commit is not the candidate")
+    for gate in run["gates"]:
+        if gate["status"] == "passed":
+            obs = (gate["observation"] or {}).get("observation", {})
+            if obs.get("exit_code") != 0 or obs.get("timed_out"):
+                exit_problems.append(
+                    f"gate {gate['name']!r} passed but its observation failed or timed out"
+                )
+    check("exit-codes", not exit_problems, "; ".join(exit_problems[:3]))
+
+    wt_ok, wt_detail = True, ""
+    try:
+        wt = _check_worktree(run)
+        if run["red"] and gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
+            wt_ok, wt_detail = False, "red test file changed"
+        phase = run["phase"]
+        if phase == "paused":
+            phase = run.get("prior_phase")
+        expected = None
+        if phase == "red":
+            expected = run["red"]["commit"]
+        elif phase in ("gates", "green", "local-verified"):
+            expected = run["candidate"]["commit"]
+        elif phase == "ready":
+            expected = gitio.rev_parse(_config(home)["repo"], run["base"])
+        if expected is not None and gitio.head(wt) != expected:
+            wt_ok, wt_detail = False, f"HEAD moved (expected {expected[:12]})"
+    except T12Error as exc:
+        wt_ok, wt_detail = False, str(exc)
+    if run["phase"] == "stopped":
+        wt_ok, wt_detail = True, "run stopped, HEAD not pinned"
+    check("worktree", wt_ok, wt_detail)
+
+    manifest_ok, manifest_detail = True, "not issued yet"
+    try:
+        events = model.read_events(home, run["task_id"])
+    except T12Error as exc:
+        events = []
+        manifest_ok, manifest_detail = False, str(exc)
+    issued = [e for e in events
+              if e.get("type") == "manifest" or
+              (e.get("type") == "verified" and e.get("detail", {}).get("manifest_sha256"))]
+    if issued:
+        last = issued[-1]
+        detail = last.get("detail", {})
+        if detail.get("out"):
+            manifest_detail = f"issued to {detail['out']} (outside state home, not re-hashed)"
+        else:
+            recorded = detail.get("manifest_sha256") or detail.get("sha256")
+            path = os.path.join(home, "evidence", run["task_id"], "manifest.txt")
+            if not recorded:
+                manifest_ok, manifest_detail = False, "issued event has no sha256"
+            elif not os.path.exists(path):
+                manifest_ok, manifest_detail = False, "manifest.txt missing"
+            elif store.sha256_file(path) != recorded:
+                manifest_ok, manifest_detail = False, "manifest.txt changed since issue"
+            else:
+                manifest_detail = f"matches issued sha256 {recorded[:12]}"
+    check("manifest", manifest_ok, manifest_detail)
+
+    for name, ok, detail in checks:
+        line = f"{'PASS' if ok else 'FAIL'} {name}"
+        if detail and not ok:
+            line += f": {detail}"
+        elif detail:
+            line += f" ({detail})"
+        print(line)
+    return 0 if all(ok for _, ok, _ in checks) else 1
 
 
 def cmd_status(args):
@@ -573,6 +694,7 @@ def cmd_resume(args):
             refs.append(gate["observation"])
     for ref in refs:
         evidence.verify_ref(home, run["task_id"], ref)
+    _verify_chain_or_raise(home, run)
     model.transition(run, prior)
     run["prior_phase"] = None
     _save(home, run, "resumed", {"phase": prior})
@@ -660,6 +782,9 @@ def build_parser():
     p = sub.add_parser("manifest"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--out")
     p.set_defaults(func=cmd_manifest)
+
+    p = sub.add_parser("verify"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_verify)
 
     p = sub.add_parser("status"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_status)

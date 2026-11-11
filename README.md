@@ -62,7 +62,8 @@ merge — a human merges.
 | `gate` | Run one gate in order; failure counts against the repair cap |
 | `replay` | Re-run the exact red command on the candidate; expect success |
 | `green` | Re-hash and re-validate all evidence; certify `local-verified` |
-| `manifest` | Write the human-readable evidence summary |
+| `manifest` | Write the manifest (recorded as an event with its SHA-256) |
+| `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk |

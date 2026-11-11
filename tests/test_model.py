@@ -7,6 +7,7 @@ or forbids one it allows, these tests fail.
 """
 
 import copy
+import json
 import os
 import tempfile
 import time
@@ -91,6 +92,72 @@ class BudgetTest(unittest.TestCase):
     def test_budgets_ok_within_limits(self):
         run = _bare_run("ready")
         self.assertIn("wall_used_s", model.check_budgets(run))
+
+
+class ChainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = self.tmp.name
+        os.makedirs(os.path.join(self.home, "runs"))
+        self.run = _bare_run("ready")
+        self.run["task_id"] = "chain-1"
+        model.save_run(self.home, self.run)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _events(self):
+        return model.read_events(self.home, "chain-1")
+
+    def _rewrite_events(self, events):
+        path = model.events_path(self.home, "chain-1")
+        with open(path, "w", encoding="utf-8") as fh:
+            for event in events:
+                fh.write(json.dumps(event, sort_keys=True) + "\n")
+
+    def test_chain_intact(self):
+        model.append_event(self.home, self.run, "prepared", {"a": 1})
+        model.append_event(self.home, self.run, "red", {"commit": "abc"})
+        model.append_event(self.home, self.run, "staged", {})
+        self.assertEqual(model.verify_chain(self.home, self.run), [])
+        events = self._events()
+        self.assertEqual([e["seq"] for e in events], [1, 2, 3])
+        self.assertEqual(events[0]["prev"], model.genesis_prev("chain-1"))
+        self.assertEqual(events[1]["prev"], events[0]["hash"])
+
+    def test_chain_detects_edited_event(self):
+        model.append_event(self.home, self.run, "prepared", {})
+        model.append_event(self.home, self.run, "red", {})
+        events = self._events()
+        events[0]["detail"] = {"tampered": True}
+        self._rewrite_events(events)
+        problems = model.verify_chain(self.home, self.run)
+        self.assertTrue(any("hash mismatch" in p for p in problems), problems)
+
+    def test_chain_detects_deleted_event(self):
+        model.append_event(self.home, self.run, "prepared", {})
+        model.append_event(self.home, self.run, "red", {})
+        model.append_event(self.home, self.run, "staged", {})
+        events = self._events()
+        self._rewrite_events([events[0], events[2]])
+        problems = model.verify_chain(self.home, self.run)
+        self.assertTrue(any("seq" in p or "prev link" in p for p in problems), problems)
+
+    def test_chain_detects_edited_run_record(self):
+        model.append_event(self.home, self.run, "prepared", {})
+        self.run["budgets"]["op_limit"] = 999
+        model.save_run(self.home, self.run)
+        problems = model.verify_chain(self.home, self.run)
+        self.assertTrue(any("state digest" in p for p in problems), problems)
+
+    def test_chain_detects_broken_prev_link(self):
+        model.append_event(self.home, self.run, "prepared", {})
+        model.append_event(self.home, self.run, "red", {})
+        events = self._events()
+        events[1]["prev"] = "0" * 64
+        self._rewrite_events(events)
+        problems = model.verify_chain(self.home, self.run)
+        self.assertTrue(any("prev link" in p for p in problems), problems)
 
 
 class ArchiveTest(unittest.TestCase):
