@@ -5,9 +5,11 @@ the real CLI end to end.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from t12 import sandbox
@@ -743,6 +745,238 @@ class CliCase(unittest.TestCase):
         self.do_review()
         result = self.t12("green", "--home", self.home, "--task-id", "demo-1", expect=1)
         self.assertIn("not run on the candidate", result.stderr)
+
+    def test_red_ignores_files_outside_the_commit(self):
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: greet already works")
+        with open(os.path.join(self.repo, ".git", "info", "exclude"), "a") as fh:
+            fh.write("app/\n")
+        self.write_worktree("app/__init__.py", APP_V1)
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        result = self.t12(
+            "red", "--home", self.home, "--task-id", "demo-1",
+            "--test-path", "tests/test_greet.py",
+            "--command", "python3 -m unittest tests.test_greet -q",
+            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
+        )
+        self.assertIn("did not fail", result.stderr)
+
+    def test_red_commit_is_the_commit_it_ran_on(self):
+        self.do_red()
+        status = json.loads(self.t12("status", "--home", self.home, "--task-id", "demo-1").stdout)
+        self.assertEqual(self._git(self.worktree, "rev-parse", "HEAD"), self.run_record()["red"]["commit"])
+        self.assertEqual(self._git(self.worktree, "status", "--porcelain"), "")
+        self.assertEqual(status["phase"], "red")
+
+    def run_record(self, home=None, task_id="demo-1"):
+        with open(os.path.join(home or self.home, "runs", f"{task_id}.json")) as fh:
+            return json.load(fh)
+
+    def test_verify_flags_gate_not_run_on_candidate(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
+        run_path = os.path.join(self.home, "runs", "demo-1.json")
+        run = self.run_record()
+        run["gates"][0]["commit"] = "0" * 40
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        self.t12("probe", "--home", self.home, "--task-id", "demo-1")
+        result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("FAIL exit-codes", result.stdout)
+        self.assertIn("not run on the candidate", result.stdout)
+
+    def prepare_custom(self, task_id, **fields):
+        task = task_dict(task_id=task_id)
+        task.update(fields)
+        path = os.path.join(self.tmp.name, f"task-{task_id}.json")
+        with open(path, "w") as fh:
+            json.dump(task, fh)
+        home = os.path.join(self.tmp.name, f"home-{task_id}")
+        self.t12("init", "--home", home, "--repo", self.repo)
+        return home, path
+
+    def test_verify_deps_reach_gates_read_only(self):
+        home, task = self.prepare_custom("demo-deps", verify_deps=["vendor"])
+        self.t12("prepare", "--home", home, "--task", task)
+        wt = os.path.join(home, "worktrees", "demo-deps")
+        with open(os.path.join(self.repo, ".git", "info", "exclude"), "a") as fh:
+            fh.write("vendor/\n")
+        os.makedirs(os.path.join(wt, "vendor"))
+        with open(os.path.join(wt, "vendor", "helper.py"), "w") as fh:
+            fh.write(APP_V2)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-deps",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write("import os, sys\n"
+                     "sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'vendor'))\n"
+                     "from helper import greet\n")
+        self._git(wt, "add", "app.py")
+        self._git(wt, "commit", "-m", "feat: greet from vendored helper")
+        self.t12("stage", "--home", home, "--task-id", "demo-deps", "--session", "sess-builder")
+        self.t12("gate", "--home", home, "--task-id", "demo-deps", "--name", "unit", "--session", "sess-qa")
+        gate = self.run_record(home, "demo-deps")["gates"][0]
+        self.assertEqual(gate["observation"]["observation"]["deps"], ["vendor"])
+        self.assertTrue(os.path.exists(os.path.join(wt, "vendor", "helper.py")),
+                        "cleanup must not delete the builder's dependency folder")
+
+    def test_verify_deps_must_stay_inside_the_worktree(self):
+        for bad in (["../outside"], ["/abs"], [".git"], "vendor"):
+            home, task = self.prepare_custom("demo-bad", verify_deps=bad)
+            result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+            self.assertIn("verify_deps", result.stderr)
+            shutil.rmtree(home)
+
+    def act(self, role, session, output, expect=0):
+        path = os.path.join(self.tmp.name, f"act-{role}-{session}.json")
+        with open(path, "w") as fh:
+            fh.write(output if isinstance(output, str) else json.dumps(output))
+        return self.t12("act", "--home", self.home, "--task-id", "demo-1",
+                        "--role", role, "--session", session, "--input", path, expect=expect)
+
+    def test_act_drives_a_run_from_worker_outputs(self):
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        self.act("test-writer", "sess-tw", {"tool": "red_test_ready", "args": {
+            "test_path": "tests/test_greet.py",
+            "command": ["python3", "-m", "unittest", "tests.test_greet", "-q"],
+            "marker": "FAILED"}})
+        self.assertEqual(self.phase(), "red")
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: implement greet")
+        self.act("builder", "sess-b", {"tool": "implementation_ready", "args": {"summary": "greet formats the name"}})
+        self.assertEqual(self.phase(), "gates")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.act("qa", "sess-qa", {"tool": "qa_report", "args": {
+            "verdict": "pass", "commands": ["python3 -m unittest"], "failures": []}})
+        self.act("reviewer", "sess-rv", {"tool": "review", "args": {
+            "verdict": "merge-ready", "findings": [], "verification": "unit gate re-run: OK"}})
+        self.t12("green", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.phase(), "local-verified")
+        events = self.event_types()
+        self.assertEqual(events.count("worker-output"), 4)
+
+    def event_types(self):
+        with open(os.path.join(self.home, "runs", "demo-1.events.jsonl")) as fh:
+            return [json.loads(line)["type"] for line in fh if line.strip()]
+
+    def test_act_rejects_malformed_output_as_a_failed_step(self):
+        cases = [
+            ("not json", "not valid JSON"),
+            ({"tool": "merge", "args": {}}, "unknown tool"),
+            ({"tool": "implementation_ready", "args": {"summary": "x"}}, "not allowed for role"),
+            ({"tool": "red_test_ready", "args": {"test_path": "t.py"}}, "missing"),
+            ({"tool": "red_test_ready", "args": {"test_path": "t.py", "command": "python3 t.py",
+                                                 "marker": "F"}}, "command"),
+            ({"tool": "escalate", "args": {"question": "q", "extra": 1}}, "unexpected"),
+        ]
+        for output, message in cases:
+            result = self.act("test-writer", "sess-tw", output, expect=1)
+            self.assertIn(message, result.stderr)
+        self.assertEqual(self.phase(), "ready")
+        self.assertEqual(self.event_types().count("worker-output-rejected"), len(cases))
+        status = json.loads(self.t12("status", "--home", self.home, "--task-id", "demo-1").stdout)
+        self.assertEqual(status["budgets"]["ops_used"], len(cases))
+
+    def test_escalation_waits_for_and_records_the_human_answer(self):
+        self.act("test-writer", "sess-tw", {"tool": "escalate", "args": {
+            "question": "Should greet() strip whitespace?"}})
+        self.assertEqual(self.phase(), "paused")
+        result = self.t12("resume", "--home", self.home, "--task-id", "demo-1", expect=1)
+        self.assertIn("Should greet() strip whitespace?", result.stderr)
+        self.t12("resume", "--home", self.home, "--task-id", "demo-1", "--answer", "No, keep it as given.")
+        self.assertEqual(self.phase(), "ready")
+        self.assertIn("human-response", self.event_types())
+        out = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                       "--role", "test-writer", "--phase", "red").stdout
+        context = json.loads(out.split("--- context (JSON) ---", 1)[1])
+        self.assertEqual(context["human_responses"], [
+            {"question": "Should greet() strip whitespace?", "answer": "No, keep it as given."}])
+        self.assertIn("red_test_ready", [t["name"] for t in context["tools"]])
+
+    def test_red_records_the_committed_test_not_a_later_edit(self):
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        test_file = os.path.join(self.worktree, "tests", "test_greet.py")
+        proc = subprocess.Popen(
+            [BIN, "red", "--home", self.home, "--task-id", "demo-1",
+             "--test-path", "tests/test_greet.py",
+             "--command", "python3 -c \"import time; time.sleep(2); print('FAILED'); raise SystemExit(1)\"",
+             "--marker", "FAILED", "--session", "sess-test-writer"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+        time.sleep(1)
+        with open(test_file, "a") as fh:
+            fh.write("# edited while red ran\n")
+        self.assertEqual(proc.wait(timeout=60), 0, proc.stderr.read())
+        red = self.run_record()["red"]
+        committed = self._git(self.worktree, "rev-parse", f"{red['commit']}:tests/test_greet.py")
+        self.assertEqual(red["test_blob"], committed)
+
+    def test_red_accepts_a_test_in_a_new_directory(self):
+        self.write_worktree("tests/unit/test_greet.py", TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", "demo-1",
+                 "--test-path", "tests/unit/test_greet.py",
+                 "--command", "python3 -m unittest discover -s tests/unit -t tests/unit -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        self.assertEqual(self.phase(), "red")
+
+    def test_verify_deps_may_not_overlap(self):
+        for bad in (["vendor", "vendor/sub"], ["vendor", "vendor"], ["vendor/sub", "vendor"]):
+            home, task = self.prepare_custom("demo-overlap", verify_deps=bad)
+            result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+            self.assertIn("overlap", result.stderr)
+            shutil.rmtree(home)
+
+    def test_act_stops_at_the_operation_budget(self):
+        home, task = self.prepare_custom("demo-ops", op_limit=2)
+        self.t12("prepare", "--home", home, "--task", task)
+        path = os.path.join(self.tmp.name, "bad.json")
+        with open(path, "w") as fh:
+            fh.write("not json")
+        for _ in range(2):
+            self.t12("act", "--home", home, "--task-id", "demo-ops", "--role", "builder",
+                     "--session", "s", "--input", path, expect=1)
+        result = self.t12("act", "--home", home, "--task-id", "demo-ops", "--role", "builder",
+                          "--session", "s", "--input", path, expect=1)
+        self.assertIn("operation budget exhausted", result.stderr)
+        self.assertEqual(self.run_record(home, "demo-ops")["budgets"]["ops_used"], 2)
+
+    def test_act_refuses_while_paused_and_binds_the_qa_session(self):
+        qa = {"tool": "qa_report", "args": {"verdict": "pass", "commands": [], "failures": []}}
+        self.act("qa", "sess-qa", qa)
+        result = self.act("builder", "sess-qa", {"tool": "implementation_ready",
+                                                 "args": {"summary": "x"}}, expect=1)
+        self.assertIn("already bound to the qa role", result.stderr)
+        self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
+        result = self.act("qa", "sess-qa", qa, expect=1)
+        self.assertIn("paused", result.stderr)
+
+    def test_blank_answer_is_refused(self):
+        self.t12("escalate", "--home", self.home, "--task-id", "demo-1", "--question", "Which locale?")
+        result = self.t12("resume", "--home", self.home, "--task-id", "demo-1",
+                          "--answer", "   ", expect=1)
+        self.assertIn("Which locale?", result.stderr)
+        self.assertEqual(self.phase(), "paused")
+
+    def test_failed_red_costs_an_operation(self):
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: greet already works")
+        self.write_worktree("tests/test_greet.py", TEST_FILE)
+        self.t12("red", "--home", self.home, "--task-id", "demo-1",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+        self.assertEqual(self.run_record()["budgets"]["ops_used"], 1)
+
+    def test_answer_without_an_open_question_is_refused(self):
+        self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
+        result = self.t12("resume", "--home", self.home, "--task-id", "demo-1",
+                          "--answer", "unprompted", expect=1)
+        self.assertIn("no open question", result.stderr)
 
 
 class DockerCase(unittest.TestCase):

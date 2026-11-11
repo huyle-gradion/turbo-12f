@@ -98,9 +98,10 @@ merge — a human merges.
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
 | `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |
-| `pause` / `resume` | Pause with a reason; resume re-validates from disk |
+| `pause` / `resume` | Pause with a reason; resume re-validates from disk (`--answer TEXT` is required while an escalation is open, and records the human's reply) |
 | `stop` | Stop a run explicitly with a reason (terminal; use `--supersede` to start over) |
 | `escalate` | Record a human question as a tool call and pause (Factor 7) |
+| `act` | Take a worker's JSON output: `--role R --session S --input FILE`. Validates it against `t12/tools.py`, stores it as evidence, and runs the step it maps to (Factor 4) |
 
 ## Task file
 
@@ -134,6 +135,14 @@ image comes from `"sandbox_image"` (default `python:3.12-slim`, or
 `T12_SANDBOX_IMAGE`) and must already be present locally —
 `prepare` refuses when the Docker daemon does not answer or the
 image is missing, so there are no implicit pulls mid-run.
+
+Red, gates, and replay run in a fresh checkout of the commit under
+test, so untracked and ignored files in the worktree are invisible to
+them. A task that needs gitignored dependency folders (`.venv`,
+`node_modules`) lists them in `"verify_deps": [".venv"]`: relative
+paths that must stay untracked. Each is linked into the checkout and
+is read-only under Landlock and Docker (not under adapter `none`),
+and the observation records which deps applied.
 
 Budgets (`time_limit_s`, `op_limit`, `repair_cap`) are optional in
 the task file. When omitted, `prepare` uses `limits.json` in the

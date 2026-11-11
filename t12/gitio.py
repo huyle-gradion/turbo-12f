@@ -12,13 +12,13 @@ from .errors import GitError
 _TIMEOUT = 60
 
 
-def git(repo, *args, timeout=_TIMEOUT):
-    obs = runner.run(["git", *[str(a) for a in args]], cwd=repo, timeout_s=timeout)
+def git(repo, *args, timeout=_TIMEOUT, env=None):
+    obs = runner.run(["git", *[str(a) for a in args]], cwd=repo, timeout_s=timeout, env=env)
     return obs
 
 
-def git_ok(repo, *args, timeout=_TIMEOUT):
-    obs = git(repo, *args, timeout=timeout)
+def git_ok(repo, *args, timeout=_TIMEOUT, env=None):
+    obs = git(repo, *args, timeout=timeout, env=env)
     if obs["timed_out"] or obs["exit_code"] != 0:
         raise GitError(
             f"git {' '.join(args)} failed (exit={obs['exit_code']}, "
@@ -55,7 +55,7 @@ def is_clean(repo):
 
 
 def dirty_paths(repo):
-    out = git_ok(repo, "status", "--porcelain")
+    out = git_ok(repo, "status", "--porcelain", "--untracked-files=all")
     paths = []
     for line in out.splitlines():
         if len(line) > 3:
@@ -108,11 +108,30 @@ def detached_checkout(repo, path, commit):
         remove_worktree_force(repo, path)
 
 
+def commit_with_path(repo, rel_path, message):
+    """A commit of HEAD plus `rel_path` as it is in the worktree, built
+    in a private index. No branch and no real index move."""
+    index = os.path.join(git_ok(repo, "rev-parse", "--absolute-git-dir"), "t12-index")
+    env = {"GIT_INDEX_FILE": index}
+    try:
+        git_ok(repo, "read-tree", "HEAD", env=env)
+        git_ok(repo, "add", "--", rel_path, env=env)
+        tree = git_ok(repo, "write-tree", env=env)
+        return git_ok(repo, "commit-tree", tree, "-p", "HEAD", "-m", message)
+    finally:
+        if os.path.exists(index):
+            os.remove(index)
+
+
+def blob_at(repo, commit, rel_path):
+    return git_ok(repo, "rev-parse", f"{commit}:{rel_path}")
+
+
+def move_branch_to(repo, commit):
+    """Point the checked-out branch and the index at `commit`, leaving
+    worktree files as they are."""
+    git_ok(repo, "reset", "-q", commit)
+
+
 def delete_branch(repo, branch):
     git_ok(repo, "branch", "-D", branch)
-
-
-def commit_file(repo, rel_path, message):
-    git_ok(repo, "add", "--", rel_path)
-    git_ok(repo, "commit", "-m", message)
-    return head(repo)

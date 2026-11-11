@@ -15,7 +15,9 @@ enforces; this file states what it does *not* claim.
   replay refuse a dirty worktree or a moved HEAD, then run in a fresh
   checkout of the candidate commit (`verify/<id>`, removed after), so
   ignored or untracked files in the builder's worktree cannot affect
-  them. Each gate records the commit it ran on.
+  them. Red does the same on the commit that adds the test. Each gate
+  records the commit it ran on. Declared `verify_deps` are the one
+  exception: linked in read-only, and named in every observation.
 - **local-verified**: the configured evidence chain was observed and
   remains internally consistent. Not QC approval, not product
   acceptance, not permission to merge.

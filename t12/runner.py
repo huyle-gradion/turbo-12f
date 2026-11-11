@@ -73,11 +73,11 @@ def run(argv, cwd, timeout_s, env=None, sandbox=None):
             argv = sandbox_module.docker_run_argv(
                 sandbox.get("image") or sandbox_module.DEFAULT_DOCKER_IMAGE,
                 sandbox["worktree"], sandbox["verify_home"],
-                container_env, argv)
+                container_env, argv, sandbox.get("read_only", ()))
             sandbox_used = "docker"
         elif adapter == "landlock" and sandbox_module.landlock_available():
             kwargs["preexec_fn"] = sandbox_module.landlock_preexec(
-                sandbox["worktree"], sandbox["verify_home"])
+                sandbox["worktree"], sandbox["verify_home"], sandbox.get("read_only", ()))
             sandbox_used = "landlock"
     try:
         proc = subprocess.Popen(argv, **kwargs)
