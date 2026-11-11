@@ -222,6 +222,61 @@ to the prior phase — worktree branch, HEAD against the expected
 commit for that phase, red test blob, and every recorded evidence
 ref re-hashed. Any drift fails closed and the run stays paused.
 
+## Safe execution (Phase 3)
+
+Enforced by the core, deterministically:
+
+- **Forbidden bypass flags.** `--dangerously-skip-permissions`,
+  `--no-sandbox`, `--bypass-sandbox` are rejected at admission
+  (gate commands) and at launch (every command the runner starts,
+  token-based so a path or code string containing the text does not
+  trip it). A task that needs one cannot be admitted.
+- **Credential stripping.** Every subprocess environment drops
+  credential variables (exact names like `GITHUB_TOKEN`,
+  `AWS_SECRET_ACCESS_KEY`, plus patterns for `*TOKEN*`, `*SECRET*`,
+  `*PASSWORD*`, `*API_KEY*`, `*PRIVATE_KEY*`) and git-redirecting
+  variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_SSH_COMMAND`,
+  `GIT_CONFIG_*`, `PYTHONPATH`, `LD_PRELOAD`, …), and sets
+  `GIT_ALLOW_PROTOCOL=none`.
+- **Empty verify-home.** Verification commands (red, gate, replay,
+  probe) run with `HOME` set to an empty, private directory inside
+  the state home, `TMPDIR` inside it, and no system git config — so
+  no operator credential store or global config is visible.
+- **Landlock cage (Linux).** Where the kernel supports it (ABI ≥ 4),
+  verification commands run under Landlock: worktree and verify-home
+  writable, system dirs read-only, `/dev` device nodes available,
+  all TCP bind/connect denied — including loopback. Verified on this
+  machine: a sandboxed command cannot write outside the worktree or
+  connect anywhere, while normal commands in the worktree are
+  unaffected. Git operations (commit, stage, worktree management)
+  run outside the cage so the factory can still record evidence.
+
+Measured, not asserted — the probes:
+
+- **Required probes** run at `prepare` and on demand (`t12 probe`):
+  `forbidden_credential_access` (planted secret env var + sentinel
+  file + home credential store must be unreadable) and
+  `external_effect_restriction` (network connect + write outside the
+  worktree must be denied). Each attempt is recorded as evidence
+  (`probe-<name>-output.txt`, `probes.json`); a granted access fails
+  the probe and is reported, not hidden.
+- **Adapter detection.** `landlock` on Linux with a new-enough
+  kernel, `sandbox-exec` detected on macOS but not enforced there
+  (unverified), `none` otherwise. When no adapter is available,
+  verification runs unwrapped and the probes record the gap.
+- **Opt-in hard gate.** A task may set `"require_probes": true`;
+  then red, gate, and replay refuse until probes have passed for
+  the run, and `prepare` stops the run if probes fail at admission.
+  Default is off: probes are evidence, and the manifest lists the
+  adapter and every probe result.
+
+What this does not claim: `local-verified` never means "isolated".
+Isolation is whatever the adapter on this host enforces, and the
+manifest says which. Tests that need a loopback server will not
+pass under the cage — that is the cage working, and such tests
+belong outside the verification gates or in a task that does not
+run them sandboxed.
+
 ## Layout
 
 ```text
@@ -271,8 +326,19 @@ examples/                a sample task file
    the disposable worktree/branch; active runs must be stopped
    first), and resume re-validates HEAD, test blob, *and* every
    evidence hash before continuing.
-3. **Safe execution** — sandbox adapters, safety probes (attempt the
-   forbidden access, verify it is denied).
+3. **Safe execution — DONE 2026-11-11.** Forbidden bypass flags
+   (`--dangerously-skip-permissions`, `--no-sandbox`,
+   `--bypass-sandbox`) rejected at admission and at launch;
+   credential/git-redirecting env vars stripped from every
+   subprocess; verification commands run with an empty verify-home
+   and, where the OS supports it, under a Landlock cage (worktree +
+   verify-home writable, system dirs read-only, all TCP denied —
+   verified on this machine: localhost connect and /tmp write both
+   denied, normal commands unaffected); two required safety probes
+   (`forbidden_credential_access`, `external_effect_restriction`)
+   run at `prepare` and on demand via `t12 probe`, recorded as
+   evidence; a task can set `require_probes` to hard-gate
+   red/gate/replay on passing probes.
 4. **Evidence integrity** — signed manifests, config digests across
    runs, tamper drills.
 5. **Limits** — calibrated defaults from real runs, budget reporting.

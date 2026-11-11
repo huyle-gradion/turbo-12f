@@ -63,6 +63,7 @@ merge — a human merges.
 | `replay` | Re-run the exact red command on the candidate; expect success |
 | `green` | Re-hash and re-validate all evidence; certify `local-verified` |
 | `manifest` | Write the human-readable evidence summary |
+| `probe` | Run the safety probes; exit 0 only if every probe passes |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk |
 | `stop` | Stop a run explicitly with a reason (terminal; use `--supersede` to start over) |
@@ -87,6 +88,8 @@ merge — a human merges.
 
 Gate commands are argv arrays, never shell strings. The task file is
 hashed at admission; `green` refuses if the recorded config changed.
+Set `"require_probes": true` to hard-gate red/gate/replay on passing
+safety probes (see `bin/t12 probe`).
 
 ## Tests
 

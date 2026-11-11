@@ -13,7 +13,7 @@ import shlex
 import sys
 import time
 
-from . import evidence, gates as gate_mod, gitio, model, runner, store
+from . import evidence, gates as gate_mod, gitio, model, runner, sandbox, store
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -60,6 +60,21 @@ def _time_left(run):
     if left <= 0:
         raise StateError("time budget exhausted")
     return left
+
+
+def _verification(home, run):
+    """Environment + sandbox context for verification commands."""
+    env = sandbox.verification_env(home, run["task_id"])
+    ctx = {"worktree": run["worktree"], "verify_home": env["HOME"]}
+    return env, ctx
+
+
+def _require_probes(run):
+    if run.get("require_probes") and not sandbox.probes_passed(run.get("probes") or []):
+        raise StateError(
+            "safety probes have not passed for this run; "
+            "run `probe` and fix the environment first"
+        )
 
 
 def _last_compacted_error(home, run):
@@ -129,6 +144,13 @@ def _manifest_text(run):
             "",
         ]
     b = run["budgets"]
+    lines.append("")
+    lines.append(f"Sandbox adapter: {run.get('sandbox_adapter') or 'unknown'}")
+    lines.append("Probes:")
+    for probe in run.get("probes") or []:
+        lines.append(f"  - {probe['name']}: {'passed' if probe['passed'] else 'FAILED'} — {probe['detail']}")
+    if not run.get("probes"):
+        lines.append("  - (none recorded)")
     lines.append(
         f"budgets: time {b['time_limit_s']}s, ops {b['ops_used']}/{b['op_limit']}, "
         f"repairs {b['repairs_used']}/{b['repair_cap']}"
@@ -180,6 +202,13 @@ def cmd_prepare(args):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
     gitio.rev_parse(repo, base)
+    for gate in task.get("gates", []):
+        try:
+            sandbox.check_command(gate.get("command") or [])
+        except T12Error as exc:
+            raise StateError(
+                f"gate {gate.get('name')!r} rejected at admission: {exc}"
+            ) from exc
     supersedes = None
     if os.path.exists(model.run_path(home, task_id)):
         if not args.supersede:
@@ -205,6 +234,22 @@ def cmd_prepare(args):
     model.transition(run, "ready")
     _save(home, run, "prepared", {"branch": run["branch"], "base": base,
                                   "supersedes": supersedes})
+    run["sandbox_adapter"] = sandbox.detect_adapter()
+    probes = sandbox.run_probes(home, run, runner.run)
+    run["probes"] = probes
+    if run["require_probes"] and not sandbox.probes_passed(probes):
+        run["stop_reason"] = "probes-failed"
+        model.transition(run, "stopped")
+        _save(home, run, "stopped", {"reason": "probes-failed"})
+        raise StateError(
+            "safety probes failed and the task requires them; run stopped — "
+            "see probes.json in the run evidence"
+        )
+    _save(home, run, "probed", {"probes": [
+        {"name": p["name"], "passed": p["passed"]} for p in probes]})
+    if not sandbox.probes_passed(probes):
+        print(f"warning: safety probes failed (adapter={run['sandbox_adapter']}); "
+              "see probes.json — isolation is NOT enforced for this run")
     print(f"ready: task={task_id} worktree={run['worktree']} branch={run['branch']}")
     return 0
 
@@ -251,6 +296,7 @@ def cmd_red(args):
     if run["phase"] != "ready":
         raise StateError(f"red requires phase 'ready', run is {run['phase']!r}")
     model.check_budgets(run)
+    _require_probes(run)
     wt = _check_worktree(run)
     test_path = args.test_path
     if not os.path.exists(os.path.join(wt, test_path)):
@@ -264,7 +310,8 @@ def cmd_red(args):
         raise StateError(f"cannot parse --command: {exc}") from exc
     if not command:
         raise StateError("--command must not be empty")
-    obs = runner.run(command, cwd=wt, timeout_s=_time_left(run))
+    env, ctx = _verification(home, run)
+    obs = runner.run(command, cwd=wt, timeout_s=_time_left(run), env=env, sandbox=ctx)
     if obs["timed_out"] or obs["exit_code"] == 0:
         _save(home, run, "red-failed", {
             "step": "red", "exit_code": obs["exit_code"],
@@ -332,10 +379,13 @@ def cmd_gate(args):
     if run["phase"] != "gates":
         raise StateError(f"gate requires phase 'gates', run is {run['phase']!r}")
     model.check_budgets(run)
+    _require_probes(run)
     wt = _check_worktree(run)
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
-    obs = runner.run(gate["command"], cwd=wt, timeout_s=_time_left(run))
+    env, ctx = _verification(home, run)
+    obs = runner.run(gate["command"], cwd=wt, timeout_s=_time_left(run),
+                     env=env, sandbox=ctx)
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
@@ -378,10 +428,13 @@ def cmd_replay(args):
     if not gate_mod.all_passed(run):
         raise StateError("replay requires all gates to pass first")
     model.check_budgets(run)
+    _require_probes(run)
     wt = _check_worktree(run)
     if gitio.head(wt) != run["candidate"]["commit"]:
         raise StateError("refusing replay: HEAD moved since stage")
-    obs = runner.run(run["red"]["command"], cwd=wt, timeout_s=_time_left(run))
+    env, ctx = _verification(home, run)
+    obs = runner.run(run["red"]["command"], cwd=wt, timeout_s=_time_left(run),
+                     env=env, sandbox=ctx)
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
         _save(home, run, "replay-failed", {
@@ -458,6 +511,10 @@ def cmd_status(args):
         "red_commit": run["red"]["commit"] if run["red"] else None,
         "candidate": run["candidate"]["commit"] if run["candidate"] else None,
         "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
+        "sandbox_adapter": run.get("sandbox_adapter"),
+        "require_probes": run.get("require_probes", False),
+        "probes": [{ "name": p["name"], "passed": p["passed"]}
+                   for p in run.get("probes") or []],
         "budgets": {
             "time_left_s": int(model.time_left_s(run)),
             "ops_used": run["budgets"]["ops_used"],
@@ -521,6 +578,21 @@ def cmd_resume(args):
     _save(home, run, "resumed", {"phase": prior})
     print(f"resumed: task={run['task_id']} phase={prior}")
     return 0
+
+
+def cmd_probe(args):
+    home = _home(args)
+    run = _run(home, args.task_id)
+    _check_worktree(run)
+    run["sandbox_adapter"] = sandbox.detect_adapter()
+    probes = sandbox.run_probes(home, run, runner.run)
+    run["probes"] = probes
+    _save(home, run, "probed", {"probes": [
+        {"name": p["name"], "passed": p["passed"]} for p in probes]})
+    for probe in probes:
+        print(f"{'PASS' if probe['passed'] else 'FAIL'} {probe['name']}: {probe['detail']}")
+    print(f"sandbox adapter: {run['sandbox_adapter']}")
+    return 0 if sandbox.probes_passed(probes) else 1
 
 
 def cmd_stop(args):
@@ -591,6 +663,9 @@ def build_parser():
 
     p = sub.add_parser("status"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("probe"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser("pause"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--reason", required=True)

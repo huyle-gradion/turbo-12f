@@ -1,0 +1,298 @@
+"""Safe execution (Phase 3).
+
+What the core enforces, deterministically:
+- Forbidden bypass flags are rejected before any command launches.
+- Credentials and git-redirecting variables are stripped from every
+  subprocess environment.
+- Verification commands (red / gate / replay / probe) run with an
+  empty verify-home and, where the OS supports it, under a Landlock
+  sandbox: worktree + verify-home writable, system dirs read-only,
+  all TCP denied.
+
+What it does NOT claim: on a host with no sandbox adapter, nothing
+above stops a subprocess from reaching the network or the rest of
+the filesystem. The safety probes measure that gap instead of
+asserting it away — attempt the access, verify it is denied, and
+record the result as evidence. `local-verified` never claims
+isolation; the manifest lists the adapter and the probe results.
+"""
+
+import ctypes
+import os
+import platform
+import re
+import shutil
+import struct
+
+from . import evidence, store
+from .errors import RunnerError
+
+# ---------------------------------------------------------------- flags
+
+FORBIDDEN_BYPASS_FLAGS = frozenset({
+    "--dangerously-skip-permissions",
+    "--no-sandbox",
+    "--bypass-sandbox",
+})
+
+
+def check_command(argv):
+    """Reject permission-bypass flags. Token-based: a flag must be a
+    whole token, or `flag=value`. Substrings inside other tokens
+    (paths, code strings) do not trigger."""
+    for token in argv:
+        lower = str(token).strip().lower()
+        for flag in FORBIDDEN_BYPASS_FLAGS:
+            if lower == flag or lower.startswith(flag + "="):
+                raise RunnerError(
+                    f"permission bypass flag {token!r} is forbidden by factory policy"
+                )
+
+
+# ---------------------------------------------------------------- env
+
+FORBIDDEN_ENV_EXACT = frozenset({
+    "ASANA_ACCESS_TOKEN", "ASANA_PAT", "ASANA_TOKEN",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "ANTHROPIC_API_KEY", "DATABASE_URL", "GITHUB_TOKEN", "GH_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS", "OPENAI_API_KEY",
+    "PRODUCTION_DATABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
+    "STRIPE_SECRET_KEY", "SLACK_BOT_TOKEN", "TURBO_GITHUB_TOKEN",
+    "SSH_AUTH_SOCK", "SSH_AGENT_PID", "GIT_ASKPASS", "SSH_ASKPASS",
+    "GIT_SSH", "GIT_SSH_COMMAND",
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
+    "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+})
+
+FORBIDDEN_ENV_PATTERNS = (
+    re.compile(r"(^|_)(PROD|PRODUCTION)(_|$)", re.IGNORECASE),
+    re.compile(r"(^|_)(SECRET|PASSWORD|PRIVATE_KEY|ACCESS_TOKEN|AUTH_TOKEN|API_KEY|PAT|TOKEN)(_|$)", re.IGNORECASE),
+    re.compile(r"^(AWS_|GITHUB_|GH_|ASANA_|STRIPE_|SLACK_|TWILIO_|SENDGRID_|SSH_|GIT_CONFIG_)", re.IGNORECASE),
+    re.compile(r"^TURBO_.*_URL$", re.IGNORECASE),
+)
+
+
+def is_forbidden_env_key(key):
+    upper = key.upper()
+    return upper in FORBIDDEN_ENV_EXACT or any(p.search(upper) for p in FORBIDDEN_ENV_PATTERNS)
+
+
+# ---------------------------------------------------------------- verify-home
+
+def verification_env(home, task_id):
+    """Empty home for verification commands: no credential stores, no
+    global git config, temp files inside the state home."""
+    verify_home = os.path.join(home, "verify-home", task_id)
+    store.mkdir_private(verify_home)
+    store.mkdir_private(os.path.join(verify_home, ".tmp"))
+    return {
+        "HOME": verify_home,
+        "TMPDIR": os.path.join(verify_home, ".tmp"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+
+
+# ---------------------------------------------------------------- Landlock
+
+_LANDLOCK_CREATE_RULESET = 444
+_LANDLOCK_ADD_RULE = 445
+_LANDLOCK_RESTRICT_SELF = 446
+_RULE_PATH_BENEATH = 1
+_PR_SET_NO_NEW_PRIVS = 38
+
+_FS_EXECUTE = 1 << 0
+_FS_WRITE_FILE = 1 << 1
+_FS_READ_FILE = 1 << 2
+_FS_READ_DIR = 1 << 3
+_FS_RW = (1 << 16) - 1
+_FS_RO_DIR = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
+_FS_RO_FILE = _FS_EXECUTE | _FS_READ_FILE
+_FS_RW_FILE = _FS_EXECUTE | _FS_WRITE_FILE | _FS_READ_FILE
+_NET_TCP = 3  # bind + connect
+
+_SYSTEM_RO_DIRS = (
+    "/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64",
+    "/etc", "/proc", "/sys", "/opt",
+)
+_DEV_RW_FILES = (
+    "/dev/null", "/dev/zero", "/dev/full", "/dev/random",
+    "/dev/urandom", "/dev/tty",
+)
+
+
+def landlock_available():
+    """True when this Linux kernel can deny TCP via Landlock (ABI >= 4)."""
+    if platform.system() != "Linux":
+        return False
+    if platform.machine() not in ("x86_64", "aarch64"):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        abi = int(libc.syscall(_LANDLOCK_CREATE_RULESET, None, 0, 1))
+        return abi >= 4
+    except Exception:
+        return False
+
+
+def detect_adapter():
+    if landlock_available():
+        return "landlock"
+    if platform.system() == "Darwin" and shutil.which("sandbox-exec"):
+        return "sandbox-exec"
+    return "none"
+
+
+def landlock_preexec(worktree, verify_home):
+    """Build a preexec function that cages the child: worktree and
+    verify-home writable, system dirs read-only, all TCP denied.
+    Raises OSError in the child if the cage cannot be built, which
+    the parent reports as a launch failure (fail closed)."""
+    worktree = os.path.realpath(worktree)
+    verify_home = os.path.realpath(verify_home)
+
+    def _preexec():
+        libc = ctypes.CDLL(None, use_errno=True)
+        attr = struct.pack("<QQQ", _FS_RW, _NET_TCP, 0)
+        ruleset_fd = int(libc.syscall(
+            _LANDLOCK_CREATE_RULESET, attr, len(attr), 0))
+        if ruleset_fd < 0:
+            raise OSError(ctypes.get_errno(), "landlock_create_ruleset failed")
+
+        def _add_rule(path, access):
+            fd = os.open(path, getattr(os, "O_PATH", 0o10000000) | os.O_CLOEXEC)
+            try:
+                rule = struct.pack("<Qii", access, fd, 0)
+                rc = int(libc.syscall(
+                    _LANDLOCK_ADD_RULE, ruleset_fd, _RULE_PATH_BENEATH, rule, 0))
+                if rc != 0:
+                    raise OSError(ctypes.get_errno(), f"landlock_add_rule failed for {path}")
+            finally:
+                os.close(fd)
+
+        try:
+            for path in _SYSTEM_RO_DIRS:
+                if os.path.exists(path):
+                    _add_rule(path, _FS_RO_DIR)
+            for path in _DEV_RW_FILES:
+                if os.path.exists(path):
+                    _add_rule(path, _FS_RW_FILE)
+            if os.path.isdir("/dev"):
+                _add_rule("/dev", _FS_RO_DIR)
+            for path in (worktree, verify_home):
+                _add_rule(path, _FS_RW)
+            if int(libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)) != 0:
+                raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS failed")
+            if int(libc.syscall(_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)) != 0:
+                raise OSError(ctypes.get_errno(), "landlock_restrict_self failed")
+        finally:
+            os.close(ruleset_fd)
+
+    return _preexec
+
+
+# ---------------------------------------------------------------- probes
+
+REQUIRED_SAFETY_PROBES = ("forbidden_credential_access", "external_effect_restriction")
+
+_CREDENTIAL_PROBE = """
+import os, sys
+sentinel = sys.argv[1]
+found = []
+for key in ("AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "OPENAI_API_KEY", "T12_PROBE_SECRET"):
+    if os.environ.get(key):
+        found.append("env:" + key)
+for path in (sentinel, os.path.join(os.path.expanduser("~"), ".aws", "credentials")):
+    try:
+        with open(path, "rb") as fh:
+            fh.read(1)
+        found.append("file:" + path)
+    except OSError:
+        pass
+if found:
+    print("GRANTED:" + ",".join(found))
+    sys.exit(1)
+print("DENIED")
+sys.exit(0)
+"""
+
+_EXTERNAL_PROBE = """
+import os, socket, sys
+granted = []
+try:
+    socket.create_connection(("8.8.8.8", 53), timeout=3)
+    granted.append("network")
+except OSError:
+    pass
+try:
+    with open("/tmp/t12-probe-outside", "w") as fh:
+        fh.write("x")
+    granted.append("outside-write")
+    os.remove("/tmp/t12-probe-outside")
+except OSError:
+    pass
+if granted:
+    print("GRANTED:" + ",".join(granted))
+    sys.exit(1)
+print("DENIED")
+sys.exit(0)
+"""
+
+
+def probe_commands(sentinel_path):
+    return [
+        ("forbidden_credential_access",
+         ["python3", "-c", _CREDENTIAL_PROBE, sentinel_path]),
+        ("external_effect_restriction",
+         ["python3", "-c", _EXTERNAL_PROBE]),
+    ]
+
+
+def probes_passed(probes):
+    return bool(probes) and all(p["passed"] for p in probes)
+
+
+def run_probes(home, run, execute):
+    """Attempt the forbidden accesses and record whether each was
+    denied. `execute` is the command runner (runner.run). A probe
+    passes when the access is denied; a granted access fails the
+    probe and is recorded as evidence, not hidden."""
+    worktree = run["worktree"]
+    venv = verification_env(home, run["task_id"])
+    sentinel = os.path.join(home, "probe-sentinel.txt")
+    store.atomic_write(sentinel, b"t12-probe-sentinel\n")
+    sandbox_ctx = {"worktree": worktree, "verify_home": venv["HOME"]}
+    os.environ["T12_PROBE_SECRET"] = "canary"
+    try:
+        results = []
+        for name, argv in probe_commands(sentinel):
+            obs = execute(argv, cwd=worktree, timeout_s=15, env=venv,
+                          sandbox=sandbox_ctx)
+            detail = ""
+            combined = (obs["stdout"] + obs["stderr"]).strip()
+            if combined:
+                detail = combined.splitlines()[-1][:200]
+            if obs["timed_out"]:
+                detail = "timed out"
+            passed = obs["exit_code"] == 0 and "DENIED" in obs["stdout"]
+            ref = evidence.write_observation(
+                home, run["task_id"], f"probe-{name}-output.txt", obs)
+            results.append({
+                "name": name, "passed": passed, "detail": detail,
+                "output": ref,
+            })
+        summary = {
+            "adapter": detect_adapter(),
+            "results": [
+                {"name": r["name"], "passed": r["passed"], "detail": r["detail"]}
+                for r in results
+            ],
+        }
+        evidence.write_evidence(
+            home, run["task_id"], "probes.json",
+            store.canonical_json(summary))
+        return results
+    finally:
+        os.environ.pop("T12_PROBE_SECRET", None)

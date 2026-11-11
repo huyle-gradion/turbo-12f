@@ -1,0 +1,171 @@
+"""Tests for safe execution (Phase 3): forbidden flags, credential
+stripping, the Landlock cage, verify-home, and safety probes.
+Enforcement tests run only where Landlock is available; elsewhere
+they skip, and the probe tests assert the gap is recorded, not hidden.
+"""
+
+import json
+import os
+import socket
+import socketserver
+import tempfile
+import threading
+import unittest
+
+from t12 import runner, sandbox
+from t12.errors import RunnerError
+
+
+class FlagTest(unittest.TestCase):
+    def test_forbidden_flags_blocked(self):
+        for argv in (
+            ["agy", "--dangerously-skip-permissions"],
+            ["agy", "--no-sandbox"],
+            ["agy", "--bypass-sandbox"],
+            ["agy", "--dangerously-skip-permissions=true"],
+            ["agy", "--Dangerously-Skip-Permissions"],
+        ):
+            with self.assertRaises(RunnerError, msg=" ".join(argv)):
+                sandbox.check_command(argv)
+
+    def test_legitimate_commands_pass(self):
+        for argv in (
+            ["git", "status", "--porcelain"],
+            ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"],
+            ["python3", "-c", "print('hello')"],
+            ["npm", "test"],
+        ):
+            sandbox.check_command(argv)  # must not raise
+
+    def test_runner_refuses_forbidden_command(self):
+        with self.assertRaises(RunnerError):
+            runner.run(["echo", "--no-sandbox"], cwd="/tmp", timeout_s=5)
+
+
+class EnvTest(unittest.TestCase):
+    def test_forbidden_keys(self):
+        for key in ("GITHUB_TOKEN", "MY_TOKEN", "AWS_SECRET_ACCESS_KEY",
+                    "DATABASE_URL", "PYTHONPATH", "OPENAI_API_KEY",
+                    "PRODUCTION_DATABASE_URL", "SSH_AUTH_SOCK", "GIT_DIR"):
+            self.assertTrue(sandbox.is_forbidden_env_key(key), key)
+        for key in ("PATH", "HOME", "USER", "LANG", "MY_SETTING"):
+            self.assertFalse(sandbox.is_forbidden_env_key(key), key)
+
+    def test_sanitized_env_strips_secrets(self):
+        planted = {
+            "GITHUB_TOKEN": "ghp_x",
+            "T12_PROBE_SECRET": "canary",
+            "MY_API_KEY": "k",
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+        }
+        old = dict(os.environ)
+        try:
+            os.environ.update(planted)
+            clean = runner.sanitized_env()
+            for key in ("GITHUB_TOKEN", "T12_PROBE_SECRET", "MY_API_KEY"):
+                self.assertNotIn(key, clean)
+            self.assertEqual(clean["GIT_ALLOW_PROTOCOL"], "none")
+            self.assertEqual(clean["PATH"], planted["PATH"])
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+
+
+class VerifyHomeTest(unittest.TestCase):
+    def test_verify_home_is_empty_and_private(self):
+        with tempfile.TemporaryDirectory() as home:
+            env = sandbox.verification_env(home, "demo-1")
+            self.assertTrue(env["HOME"].startswith(home))
+            self.assertTrue(os.path.isdir(env["HOME"]))
+            self.assertTrue(os.path.isdir(env["TMPDIR"]))
+            self.assertEqual(oct(os.stat(env["HOME"]).st_mode & 0o777), "0o700")
+            self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+
+
+@unittest.skipUnless(sandbox.landlock_available(), "Landlock unavailable")
+class LandlockTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.worktree = os.path.join(self.tmp.name, "wt")
+        self.verify_home = os.path.join(self.tmp.name, "vh")
+        os.makedirs(self.worktree)
+        os.makedirs(self.verify_home)
+        self.ctx = {"worktree": self.worktree, "verify_home": self.verify_home}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_worktree_readable_and_writable(self):
+        with open(os.path.join(self.worktree, "a.txt"), "w") as fh:
+            fh.write("hello\n")
+        obs = runner.run(
+            ["python3", "-c", "print(open('a.txt').read().strip())"],
+            cwd=self.worktree, timeout_s=10, sandbox=self.ctx)
+        self.assertEqual(obs["exit_code"], 0)
+        self.assertEqual(obs["stdout"].strip(), "hello")
+        self.assertEqual(obs["sandbox"], "landlock")
+
+    def test_write_outside_worktree_denied(self):
+        target = os.path.join(self.tmp.name, "outside.txt")
+        obs = runner.run(
+            ["python3", "-c", f"open({target!r}, 'w').write('x')"],
+            cwd=self.worktree, timeout_s=10, sandbox=self.ctx)
+        self.assertNotEqual(obs["exit_code"], 0)
+        self.assertIn("PermissionError", obs["stderr"])
+        self.assertFalse(os.path.exists(target))
+
+    def test_localhost_tcp_denied_but_allowed_without_sandbox(self):
+        server = socketserver.TCPServer(("127.0.0.1", 0), socketserver.BaseRequestHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.handle_request, daemon=True)
+        thread.start()
+        code = (
+            "import socket; socket.create_connection(('127.0.0.1', %d), timeout=3);"
+            " print('CONNECTED')" % port
+        )
+        try:
+            denied = runner.run(["python3", "-c", code], cwd=self.worktree,
+                                timeout_s=10, sandbox=self.ctx)
+            self.assertNotEqual(denied["exit_code"], 0)
+            self.assertEqual(denied["sandbox"], "landlock")
+            allowed = runner.run(["python3", "-c", code], cwd=self.worktree,
+                                 timeout_s=10)
+            self.assertEqual(allowed["exit_code"], 0)
+            self.assertIn("CONNECTED", allowed["stdout"])
+        finally:
+            server.server_close()
+
+
+class ProbeTest(unittest.TestCase):
+    def test_probes_pass_under_landlock(self):
+        if not sandbox.landlock_available():
+            self.skipTest("Landlock unavailable; probes measure the gap")
+        with tempfile.TemporaryDirectory() as home:
+            worktree = os.path.join(home, "wt")
+            os.makedirs(worktree)
+            run = {"task_id": "probe-1", "worktree": worktree}
+            results = sandbox.run_probes(home, run, runner.run)
+            self.assertEqual(
+                [r["name"] for r in results],
+                list(sandbox.REQUIRED_SAFETY_PROBES))
+            for result in results:
+                self.assertTrue(result["passed"], result)
+            self.assertTrue(sandbox.probes_passed(results))
+            probes_json = os.path.join(home, "evidence", "probe-1", "probes.json")
+            self.assertTrue(os.path.exists(probes_json))
+            with open(probes_json) as fh:
+                summary = json.load(fh)
+            self.assertEqual(summary["adapter"], "landlock")
+            self.assertNotIn("T12_PROBE_SECRET", os.environ)
+
+    def test_probes_passed_requires_all(self):
+        self.assertFalse(sandbox.probes_passed([]))
+        self.assertFalse(sandbox.probes_passed([
+            {"name": "a", "passed": True}, {"name": "b", "passed": False}]))
+        self.assertTrue(sandbox.probes_passed([
+            {"name": "a", "passed": True}, {"name": "b", "passed": True}]))
+
+
+if __name__ == "__main__":
+    unittest.main()

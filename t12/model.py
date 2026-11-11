@@ -93,6 +93,9 @@ def new_run(task, repo, home, supersedes=None):
         "candidate": None,
         "replay": None,
         "stop_reason": None,
+        "require_probes": bool(task.get("require_probes", False)),
+        "probes": [],
+        "sandbox_adapter": None,
     }
 
 

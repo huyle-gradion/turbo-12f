@@ -266,6 +266,54 @@ class CliCase(unittest.TestCase):
         self.assertIn("evidence changed", result.stderr)
         self.assertEqual(self.phase(), "paused")
 
+    def test_probe_command_passes(self):
+        result = self.t12("probe", "--home", self.home, "--task-id", "demo-1")
+        self.assertIn("PASS forbidden_credential_access", result.stdout)
+        self.assertIn("PASS external_effect_restriction", result.stdout)
+        self.assertIn("sandbox adapter: landlock", result.stdout)
+        status = json.loads(self.t12(
+            "status", "--home", self.home, "--task-id", "demo-1").stdout)
+        self.assertEqual(status["sandbox_adapter"], "landlock")
+        self.assertTrue(all(p["passed"] for p in status["probes"]))
+
+    def test_prepare_rejects_forbidden_gate_at_admission(self):
+        task = {
+            "id": "demo-2", "title": "bad gate", "base": "main",
+            "acceptance_criteria": ["x"],
+            "gates": [{"name": "unit", "order": 1,
+                       "command": ["agy", "--dangerously-skip-permissions"]}],
+        }
+        task_path = os.path.join(self.tmp.name, "task2.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        result = self.t12("prepare", "--home", self.home, "--task", task_path, expect=1)
+        self.assertIn("rejected at admission", result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "runs", "demo-2.json")))
+
+    def test_require_probes_blocks_red_when_probes_failed(self):
+        with open(self.task_path) as fh:
+            task = json.load(fh)
+        task["id"] = "demo-rp"
+        task["require_probes"] = True
+        task_path = os.path.join(self.tmp.name, "task-rp.json")
+        with open(task_path, "w") as fh:
+            json.dump(task, fh)
+        home2 = os.path.join(self.tmp.name, "home2")
+        self.t12("init", "--home", home2, "--repo", self.repo)
+        self.t12("prepare", "--home", home2, "--task", task_path)
+        # Simulate a failed probe by editing the recorded result.
+        run_path = os.path.join(home2, "runs", "demo-rp.json")
+        with open(run_path) as fh:
+            run = json.load(fh)
+        run["probes"][0]["passed"] = False
+        with open(run_path, "w") as fh:
+            json.dump(run, fh)
+        result = self.t12("red", "--home", home2, "--task-id", "demo-rp",
+                          "--command", "python3 -m unittest tests.test_greet -q",
+                          "--marker", "nope", "--test-path", "tests/test_greet.py",
+                          expect=1)
+        self.assertIn("safety probes have not passed", result.stderr)
+
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
         self.write_worktree("app.py", APP_WRONG)  # close, but still failing

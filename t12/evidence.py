@@ -29,7 +29,7 @@ def write_observation(home, task_id, name, observation):
     text = (
         f"$ {' '.join(observation['argv'])}\n"
         f"exit={observation['exit_code']} timed_out={observation['timed_out']} "
-        f"duration_s={observation['duration_s']}\n"
+        f"duration_s={observation['duration_s']} sandbox={observation.get('sandbox', 'none')}\n"
         f"--- stdout ---\n{observation['stdout']}"
         f"--- stderr ---\n{observation['stderr']}"
     )
@@ -39,6 +39,7 @@ def write_observation(home, task_id, name, observation):
         "exit_code": observation["exit_code"],
         "timed_out": observation["timed_out"],
         "duration_s": observation["duration_s"],
+        "sandbox": observation.get("sandbox", "none"),
     }
     return ref
 
