@@ -58,6 +58,10 @@ def events_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.events.jsonl")
 
 
+def verify_checkout_dir(home, task_id):
+    return os.path.join(home, "verify", task_id)
+
+
 def evidence_dir(home, task_id):
     return os.path.join(home, "evidence", task_id)
 

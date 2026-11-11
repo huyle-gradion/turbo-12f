@@ -12,8 +12,10 @@ enforces; this file states what it does *not* claim.
   candidate; verification bound to the old one does not carry over.
 - **Gate**: one ordered check from the task file. A later gate cannot
   run until the prior gate passed on the same candidate. Gates and
-  replay run only on a clean worktree at the candidate commit, and
-  each gate records the commit it ran on.
+  replay refuse a dirty worktree or a moved HEAD, then run in a fresh
+  checkout of the candidate commit (`verify/<id>`, removed after), so
+  ignored or untracked files in the builder's worktree cannot affect
+  them. Each gate records the commit it ran on.
 - **local-verified**: the configured evidence chain was observed and
   remains internally consistent. Not QC approval, not product
   acceptance, not permission to merge.

@@ -72,15 +72,23 @@ def _time_left(run):
     return left
 
 
-def _verification(home, run):
+def _verification(home, run, worktree):
     """Environment + sandbox context for verification commands. The
     context carries the run's adapter, so every verification command
     uses the adapter the run was admitted with."""
     env = sandbox.verification_env(home, run["task_id"])
-    ctx = {"worktree": run["worktree"], "verify_home": env["HOME"],
+    ctx = {"worktree": worktree, "verify_home": env["HOME"],
            "adapter": run.get("sandbox_adapter"),
            "image": run.get("sandbox_image")}
     return env, ctx
+
+
+def _run_on_candidate(home, run, wt, argv):
+    path = model.verify_checkout_dir(home, run["task_id"])
+    with gitio.detached_checkout(wt, path, run["candidate"]["commit"]) as checkout:
+        env, ctx = _verification(home, run, checkout)
+        return runner.run(argv, cwd=checkout, timeout_s=_time_left(run),
+                          env=env, sandbox=ctx)
 
 
 def _require_probes(run):
@@ -355,7 +363,7 @@ def cmd_red(args):
         raise StateError(f"cannot parse --command: {exc}") from exc
     if not command:
         raise StateError("--command must not be empty")
-    env, ctx = _verification(home, run)
+    env, ctx = _verification(home, run, wt)
     obs = runner.run(command, cwd=wt, timeout_s=_time_left(run), env=env, sandbox=ctx)
     if obs["timed_out"] or obs["exit_code"] == 0:
         _save(home, run, "red-failed", {
@@ -434,9 +442,7 @@ def cmd_gate(args):
     wt = _check_candidate_tree(run, "gate")
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
-    env, ctx = _verification(home, run)
-    obs = runner.run(gate["command"], cwd=wt, timeout_s=_time_left(run),
-                     env=env, sandbox=ctx)
+    obs = _run_on_candidate(home, run, wt, gate["command"])
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
     gate["commit"] = run["candidate"]["commit"]
@@ -484,9 +490,7 @@ def cmd_replay(args):
     model.check_budgets(run)
     _require_probes(run)
     wt = _check_candidate_tree(run, "replay")
-    env, ctx = _verification(home, run)
-    obs = runner.run(run["red"]["command"], cwd=wt, timeout_s=_time_left(run),
-                     env=env, sandbox=ctx)
+    obs = _run_on_candidate(home, run, wt, run["red"]["command"])
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
         _save(home, run, "replay-failed", {

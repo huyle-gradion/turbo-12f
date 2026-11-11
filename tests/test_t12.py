@@ -871,11 +871,16 @@ class DockerCase(unittest.TestCase):
         log = self.docker_log()
         runs = [entry for entry in log if entry[:1] == ["run"]]
         self.assertTrue(runs, "no docker run invocations recorded")
+        checkout = os.path.join(self.home, "verify", "demo-docker")
         for entry in runs:
             self.assertIn("--network", entry)
             self.assertEqual(entry[entry.index("--network") + 1], "none")
-            self.assertIn(f"{wt}:{wt}:rw", entry)
+            self.assertTrue(f"{wt}:{wt}:rw" in entry or f"{checkout}:{checkout}:rw" in entry,
+                            f"unexpected mounts: {entry}")
             self.assertIn("python:3.12-slim", entry)
+        self.assertTrue(any(f"{checkout}:{checkout}:rw" in entry for entry in runs),
+                        "gate and replay did not run in the candidate checkout")
+        self.assertFalse(os.path.exists(checkout), "candidate checkout was not removed")
         flat = " ".join(" ".join(entry) for entry in log)
         self.assertNotIn("canary-secret-value", flat)
 
