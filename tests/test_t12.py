@@ -978,6 +978,52 @@ class CliCase(unittest.TestCase):
                           "--answer", "unprompted", expect=1)
         self.assertIn("no open question", result.stderr)
 
+    def spawn(self, *args):
+        return subprocess.Popen([BIN, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+
+    def test_concurrent_commands_on_one_run_keep_the_log_intact(self):
+        path = os.path.join(self.tmp.name, "bad.json")
+        with open(path, "w") as fh:
+            fh.write("not json")
+        procs = [self.spawn("act", "--home", self.home, "--task-id", "demo-1", "--role", "builder",
+                            "--session", "s", "--input", path) for _ in range(10)]
+        errors = [p.communicate(timeout=60)[1] for p in procs]
+        rejected = [e for e in errors if "not valid JSON" in e]
+        busy = [e for e in errors if "is busy" in e]
+        self.assertEqual(len(rejected) + len(busy), len(procs), errors)
+        self.t12("verify", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.event_types().count("worker-output-rejected"), len(rejected))
+        self.assertEqual(self.run_record()["budgets"]["ops_used"], len(rejected))
+
+    def test_two_tasks_run_at_the_same_time(self):
+        task = task_dict(task_id="demo-2")
+        path = os.path.join(self.tmp.name, "task-demo-2.json")
+        with open(path, "w") as fh:
+            json.dump(task, fh)
+        self.t12("prepare", "--home", self.home, "--task", path)
+        ids = ("demo-1", "demo-2")
+        for task_id in ids:
+            wt = os.path.join(self.home, "worktrees", task_id)
+            with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+                fh.write(TEST_FILE)
+            self.t12("red", "--home", self.home, "--task-id", task_id,
+                     "--test-path", "tests/test_greet.py",
+                     "--command", "python3 -m unittest tests.test_greet -q",
+                     "--marker", "FAILED", "--session", "sess-test-writer")
+            with open(os.path.join(wt, "app.py"), "w") as fh:
+                fh.write(APP_V2)
+            self._git(wt, "commit", "-qam", "feat: implement greet")
+            self.t12("stage", "--home", self.home, "--task-id", task_id, "--session", "sess-builder")
+        for step in (("gate", "--name", "unit", "--session", "sess-qa"), ("replay",)):
+            procs = [self.spawn(step[0], "--home", self.home, "--task-id", t, *step[1:]) for t in ids]
+            for proc in procs:
+                _, err = proc.communicate(timeout=120)
+                self.assertEqual(proc.returncode, 0, err)
+        for task_id in ids:
+            self.assertEqual(self.run_record(task_id=task_id)["phase"], "green")
+            self.t12("verify", "--home", self.home, "--task-id", task_id)
+
 
 class DockerFlow(unittest.TestCase):
     """A product repo and the commands that drive a docker-adapter run."""

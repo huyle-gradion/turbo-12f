@@ -8,7 +8,6 @@ the worker did in the worktree.
 import argparse
 import json
 import os
-import re
 import shlex
 import sys
 import time
@@ -20,7 +19,6 @@ from .errors import StateError, T12Error
 VERSION = "0.1.0"
 ROLES = ("test-writer", "builder", "reviewer", "qa", "security")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
 # ---------------------------------------------------------------- helpers
@@ -250,10 +248,12 @@ def cmd_prepare(args):
     home = _home(args)
     config = _config(home)
     task = store.load_json(args.task)
-    task_id = task.get("id", "")
-    if not TASK_ID_RE.match(task_id):
-        raise StateError(f"task id must match {TASK_ID_RE.pattern}: {task_id!r}")
-    repo = config["repo"]
+    task_id = task.get("id")
+    with model.run_lock(home, task_id):
+        return _admit(home, config["repo"], task, task_id, args.supersede)
+
+
+def _admit(home, repo, task, task_id, supersede):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
@@ -267,7 +267,7 @@ def cmd_prepare(args):
             ) from exc
     supersedes = None
     if os.path.exists(model.run_path(home, task_id)):
-        if not args.supersede:
+        if not supersede:
             raise StateError(
                 f"run already exists for task {task_id!r}; refusing to overwrite — "
                 "stop it, then re-run prepare with --supersede"
@@ -1133,7 +1133,10 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
-        return args.func(args)
+        if getattr(args, "task_id", None) is None or args.func in (cmd_status, cmd_context):
+            return args.func(args)
+        with model.run_lock(_home(args), args.task_id):
+            return args.func(args)
     except T12Error as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

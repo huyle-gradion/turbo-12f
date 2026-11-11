@@ -4,8 +4,11 @@ state unified (Factor 5). The state machine is the only control flow
 on disk (Factor 12): load state, apply one event, persist atomically.
 """
 
+import contextlib
+import fcntl
 import json
 import os
+import re
 import time
 
 from . import limits as limits_mod
@@ -13,6 +16,7 @@ from . import store
 from .errors import BudgetError, StateError
 
 VERSION = 1
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 PROVENANCE = "observed-helper-execution"
 
 # Roles that run as separate worker invocations. A session id may be
@@ -56,6 +60,27 @@ def run_path(home, task_id):
 
 def events_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.events.jsonl")
+
+
+@contextlib.contextmanager
+def run_lock(home, task_id):
+    """Hold the run's lock for one command. The kernel releases it when
+    the process exits, so a crashed command never leaves it held."""
+    if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
+        raise StateError(f"task id must match {TASK_ID_RE.pattern}: {task_id!r}")
+    path = os.path.join(home, "runs", f"{task_id}.lock")
+    if not os.path.isdir(os.path.dirname(path)):
+        raise StateError(f"no turbo-12f state home at {home}; run `init` first")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise StateError(f"run {task_id!r} is busy: another t12 command holds "
+                             f"{path}; retry when it finishes") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 def verify_checkout_dir(home, task_id):

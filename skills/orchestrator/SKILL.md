@@ -1,8 +1,14 @@
 # Orchestrator skill
 
-You dispatch work; you do not implement it. One task at a time, one
-lane at a time, through the deterministic CLI (`bin/t12`). The CLI
-owns state, control flow, evidence, and budgets. You own routing.
+You dispatch work; you do not implement it. One lane at a time per
+run, through the deterministic CLI (`bin/t12`). The CLI owns state,
+control flow, evidence, and budgets. You own routing.
+
+Separate runs may proceed at the same time, one orchestrator per run.
+Each command that changes a run holds that run's lock, so a second
+command on the same run fails with `busy`; wait for the first and
+retry. The factory does not detect merge conflicts between runs, so
+run two tasks side by side only when they change different files.
 
 ## Lane order
 
