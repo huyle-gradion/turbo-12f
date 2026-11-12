@@ -204,6 +204,16 @@ intake: {"adapter": "evil"}
         self.assertIn("skipped gh-1", result.stdout)
         self.assertEqual(self.task("gh-1.json")["title"], "by hand")
 
+    def test_another_repos_task_with_the_same_id_is_not_overwritten(self):
+        os.makedirs(self.out)
+        theirs = {"id": "gh-1", "title": "from another repo", "acceptance_criteria": ["c"],
+                  "source": {"adapter": "github-issues", "ref": "other/repo#1"}}
+        with open(os.path.join(self.out, "gh-1.json"), "w") as fh:
+            json.dump(theirs, fh)
+        result = self.intake([issue(1)], ["--label", "factory"])
+        self.assertEqual(self.task("gh-1.json"), theirs)
+        self.assertRegex(result.stdout, r"skipped gh-1: .*other/repo#1.*o/r#1")
+
     def test_a_planted_tmp_symlink_does_not_redirect_the_write(self):
         os.makedirs(self.out)
         victim = os.path.join(self.tmp.name, "victim.txt")

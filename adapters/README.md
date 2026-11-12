@@ -113,7 +113,9 @@ task's spec, so who may apply the label is the trust decision.
 An edited issue rewrites its file, unless the task already has a run
 in `--home`, which is then left alone. Without `--home` intake cannot
 see runs, so pass it whenever a state home exists. A file in the
-queue directory that intake did not write is never overwritten. Intake
+queue directory is overwritten only if its `source` names the same
+adapter and the same `owner/name#number`; ids repeat across repos, so
+`gh-1` from another repo is skipped with the reason printed. Intake
 never deletes files: remove the file of a closed issue yourself.
 
 **Failure.** Intake writes no outcome report, so a failed run must

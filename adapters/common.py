@@ -300,19 +300,33 @@ def _render(task):
     return json.dumps(task, indent=2, sort_keys=True) + "\n"
 
 
+def _source_of(text):
+    """(adapter, ref) of a task file's text, or None."""
+    try:
+        source = json.loads(text).get("source") or {}
+        return source.get("adapter"), source.get("ref")
+    except (ValueError, AttributeError):
+        return None
+
+
 def _write_if_changed(out_dir, task, adapter):
-    """(verdict, detail). Never overwrites a file this adapter did not write."""
+    """(verdict, detail). Overwrites only a file this adapter wrote for
+    the same issue: ids repeat across repos, so the adapter alone is
+    not enough."""
     path = os.path.join(out_dir, f"{task['id']}.json")
     text = _render(task)
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as fh:
                 current = fh.read()
-            owner = (json.loads(current).get("source") or {}).get("adapter")
-        except (OSError, ValueError, AttributeError):
-            owner = None
-        if owner != adapter:
-            return "skipped", f"{path} exists and was not written by {adapter}"
+        except OSError:
+            current = ""
+        mine = (adapter, task["source"]["ref"])
+        owner = _source_of(current)
+        if owner != mine:
+            found = f"{owner[0]} {owner[1]}" if owner and all(owner) else "no intake source"
+            return "skipped", (f"{path} exists and holds {found}, "
+                               f"not {mine[0]} {mine[1]}")
         if current == text:
             return "unchanged", path
     fd, tmp = tempfile.mkstemp(dir=out_dir, prefix=f".{task['id']}.", suffix=".tmp")
