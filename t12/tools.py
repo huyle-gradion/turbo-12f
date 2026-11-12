@@ -7,37 +7,38 @@ output contracts in prompts/*.md. Pure: no I/O, no run state.
 import json
 
 from .errors import StateError
-from .model import SESSION_ROLES
 
 STR = "string"
 STR_LIST = "list of strings"
 OBJ_LIST = "list of objects"
 ARGV = "non-empty list of strings"
 
+ESCALATE = {"escalate": {"question": STR}}
+
+# Keyed by kind, the part of a role the core knows how to enforce. A
+# project names its own roles, but each maps to one of these kinds.
 TOOLS = {
-    "red_test_ready": {
-        "roles": ("test-writer",),
-        "args": {"test_path": STR, "command": ARGV, "marker": STR},
+    "test-writer": {
+        "red_test_ready": {"test_path": STR, "command": ARGV, "marker": STR},
+        **ESCALATE,
     },
-    "implementation_ready": {
-        "roles": ("builder",),
-        "args": {"summary": STR},
+    "builder": {
+        "implementation_ready": {"summary": STR},
+        **ESCALATE,
     },
-    "qa_report": {
-        "roles": ("qa",),
-        "args": {"verdict": ("pass", "fail", "unverified"),
-                 "commands": STR_LIST, "failures": STR_LIST},
+    "qa": {
+        "qa_report": {"verdict": ("pass", "fail", "unverified"),
+                      "commands": STR_LIST, "failures": STR_LIST},
+        **ESCALATE,
     },
     "review": {
-        "roles": ("reviewer", "security"),
-        "args": {"verdict": ("merge-ready", "blocked", "human-gated", "unverified"),
-                 "findings": OBJ_LIST, "verification": STR},
-    },
-    "escalate": {
-        "roles": SESSION_ROLES,
-        "args": {"question": STR},
+        "review": {"verdict": ("merge-ready", "blocked", "human-gated", "unverified"),
+                   "findings": OBJ_LIST, "verification": STR},
+        **ESCALATE,
     },
 }
+KINDS = tuple(TOOLS)
+ALL_TOOLS = sorted({name for tools in TOOLS.values() for name in tools})
 
 
 def _check(name, value, kind):
@@ -54,7 +55,7 @@ def _check(name, value, kind):
     return None if ok else f"{name} must be a {OBJ_LIST}"
 
 
-def parse(text, role):
+def parse(text, kind):
     """Return (tool, args) or raise StateError listing every problem."""
     try:
         data = json.loads(text)
@@ -64,25 +65,26 @@ def parse(text, role):
             or not isinstance(data["tool"], str) or not isinstance(data["args"], dict)):
         raise StateError('worker output must be exactly {"tool": ..., "args": {...}}')
     tool = data["tool"]
-    spec = TOOLS.get(tool)
+    if tool not in ALL_TOOLS:
+        raise StateError(f"unknown tool {tool!r}; tools are {ALL_TOOLS}")
+    spec = TOOLS[kind].get(tool)
     if spec is None:
-        raise StateError(f"unknown tool {tool!r}; tools are {sorted(TOOLS)}")
-    if role not in spec["roles"]:
-        raise StateError(f"tool {tool!r} is not allowed for role {role!r}")
+        raise StateError(f"tool {tool!r} is not allowed for a {kind} role; "
+                         f"it may call {sorted(TOOLS[kind])}")
     args = data["args"]
-    problems = [f"missing arg {k!r}" for k in spec["args"] if k not in args]
-    problems += [f"unexpected arg {k!r}" for k in args if k not in spec["args"]]
-    problems += [p for k, kind in spec["args"].items() if k in args
-                 for p in [_check(k, args[k], kind)] if p]
+    problems = [f"missing arg {k!r}" for k in spec if k not in args]
+    problems += [f"unexpected arg {k!r}" for k in args if k not in spec]
+    problems += [p for k, shape in spec.items() if k in args
+                 for p in [_check(k, args[k], shape)] if p]
     if problems:
         raise StateError(f"invalid {tool!r} call: " + "; ".join(problems))
     return tool, args
 
 
-def schema_for(role):
-    """The tools a role may call, for its context window."""
+def schema_for(kind):
+    """The tools a role of this kind may call, for its context window."""
     return [
         {"name": name, "args": {k: list(v) if isinstance(v, tuple) else v
-                                for k, v in spec["args"].items()}}
-        for name, spec in TOOLS.items() if role in spec["roles"]
+                                for k, v in spec.items()}}
+        for name, spec in TOOLS[kind].items()
     ]

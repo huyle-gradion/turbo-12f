@@ -17,14 +17,14 @@ def git(repo, *args, timeout=_TIMEOUT, env=None):
     return obs
 
 
-def git_ok(repo, *args, timeout=_TIMEOUT, env=None):
+def git_ok(repo, *args, timeout=_TIMEOUT, env=None, strip=True):
     obs = git(repo, *args, timeout=timeout, env=env)
     if obs["timed_out"] or obs["exit_code"] != 0:
         raise GitError(
             f"git {' '.join(args)} failed (exit={obs['exit_code']}, "
             f"timed_out={obs['timed_out']}): {(obs['stderr'] or obs['stdout']).strip()[:500]}"
         )
-    return obs["stdout"].strip()
+    return obs["stdout"].strip() if strip else obs["stdout"]
 
 
 def is_git_repo(path):
@@ -150,10 +150,15 @@ def commit_with_path(repo, rel_path, message):
 
 
 def file_at(repo, commit, rel_path):
-    """The file's text at `commit`, or None when the commit lacks it."""
-    if git(repo, "cat-file", "-e", f"{commit}:{rel_path}")["exit_code"] != 0:
+    """The file's text at `commit`, or None when the commit lacks it.
+    A folder at the path is an error, not an absence: reading the
+    profile as missing would drop every rule in it."""
+    obs = git(repo, "cat-file", "-t", f"{commit}:{rel_path}")
+    if obs["exit_code"] != 0:
         return None
-    return git_ok(repo, "show", f"{commit}:{rel_path}")
+    if obs["stdout"].strip() != "blob":
+        raise GitError(f"{rel_path} at {commit[:12]} is a {obs['stdout'].strip()}, not a file")
+    return git_ok(repo, "show", f"{commit}:{rel_path}", strip=False)
 
 
 def blob_at(repo, commit, rel_path):

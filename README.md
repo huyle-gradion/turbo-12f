@@ -55,6 +55,15 @@ so the test-writer cannot stage and the builder cannot review. A
 task lists the reviews green requires in `required_reviews`
 (default `["reviewer"]`; add `"security"` when it matters).
 
+Roles are names; each maps to one of four kinds, which fix the tools
+it may call: `test-writer` (`red_test_ready`), `builder`
+(`implementation_ready`), `qa` (`qa_report`) and `review` (`review`).
+Every kind may call `escalate`. The built-in roles are test-writer,
+builder, qa, and reviewer and security (both `review`). A project
+adds its own roles in its profile (see below); `prepare` freezes the
+run's roles, and `act`, `review` and `context` refuse a role the run
+does not have.
+
 ## Delivery
 
 The core never touches the network. Adapters do the remote work and
@@ -85,12 +94,12 @@ merge — a human merges.
 |---|---|
 | `init` | Bind a repo + state home, create the directory layout |
 | `prepare` | Admit a task: validate repo/base/branch/gates, create worktree + run record (`--supersede` archives a stopped run and starts fresh) |
-| `context` | Print the owned prompt + minimal context for a role (Factor 2/3/9) |
+| `context` | Print the role's prompt and skills + minimal context (Factor 2/3/9); the JSON's `instructions` lists the source, path and SHA-256 of each file used |
 | `red` | Run the test command, expect failure + marker, commit the test, record red evidence |
 | `stage` | Pin the candidate commit; verify ancestry, clean tree, unchanged test blob |
-| `gate` | Run one gate in order; failure counts against the repair cap |
+| `gate` | Run one gate in order; failure counts against the repair cap (`--role` names a qa-kind role, default `qa`) |
 | `replay` | Re-run the exact red command on the candidate; expect success |
-| `review` | Record a reviewer/security review: `--role reviewer\|security --session S --verdict approve\|changes-requested --report FILE` |
+| `review` | Record a review by any review role of the run: `--role R --session S --verdict approve\|changes-requested --report FILE` |
 | `green` | Re-hash and re-validate all evidence; requires replay + approving reviews; certify `local-verified` |
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
@@ -168,7 +177,11 @@ file only says what is unique to it:
   "sandbox_image": "my-product-verify:1",
   "verify_deps": [".venv"],
   "protected_paths": ["guards", "e2e"],
-  "security_review_paths": ["src/auth"]
+  "security_review_paths": ["src/auth"],
+  "roles": {
+    "builder": {"skills": ["plain-ui-copy"]},
+    "ux-copy": {"kind": "review", "prompt": "ux-copy.md"}
+  }
 }
 ```
 
@@ -193,7 +206,7 @@ may come from an issue tracker:
 | `sandbox_adapter`, `sandbox_image` | Refused unless equal |
 | `verify_deps` | The task may only narrow the profile's list; a profile without one allows none |
 | budgets | The task wins |
-| `protected_paths`, `security_review_paths` | Profile only; a task may not set them |
+| `protected_paths`, `security_review_paths`, `roles` | Profile only; a task may not set them |
 
 `stage` refuses a candidate that changes a protected path, measured
 from both the task's base and the point where the candidate leaves
@@ -205,6 +218,23 @@ candidate commits is refused at the gate. A base with no history in
 common with trunk is refused at `prepare`. Deps still come
 from the builder's worktree, so a builder can put code in `.venv` or
 `node_modules` that a gate runs; the profile does not close that.
+
+`roles` maps a role name to `{"kind", "prompt", "skills"}`. The
+built-in roles are always present; a project may add roles and give
+any role a prompt or skills, but may not change a built-in's kind.
+`required_reviews` must name review roles. With the profile above,
+green waits for an approving `ux-copy` review as well as the
+reviewer's.
+
+`context --role R` reads R's instructions in layers. The prompt is
+`.t12/prompts/<prompt>` on the trunk commit when the role names one,
+else the factory's `prompts/<role>.md` for a built-in role, or the
+prompt of the first built-in role of its kind for a project role
+(`prompts/reviewer.md` for `ux-copy`). Each skill is
+`.t12/skills/<name>/SKILL.md` on the trunk commit, else the factory's
+`skills/<name>/SKILL.md`; a skill found in neither is refused at
+`prepare` and `context`. A worktree edit to `.t12/` changes none of
+this for the running task.
 
 ## Running several tasks at once
 
@@ -240,7 +270,8 @@ merge commits for factory branches.
 Runs prepared before `touches` existed carry no `base_commit`, so
 `stage` skips the `touches` and profile checks for them. Finish or
 supersede them before relying on either. Runs prepared after `touches`
-but before project profiles are refused at `stage`; supersede them.
+but before project profiles are refused at `stage`, and runs prepared
+before named roles are refused at every role step; supersede them.
 
 ## Improving the factory
 
@@ -265,7 +296,7 @@ a task aimed at turbo-12f. Two rules keep that safe:
   when its own code sits inside the state home it is given.
 - **Profile changes need a security review.** A product repo may list
   paths in `.t12/project.json` as `"security_review_paths"`. `stage`
-  reads the profile from the run's base commit, not the candidate, and
+  reads the profile from the trunk commit, not the candidate, and
   adds `security` to `required_reviews` when the candidate changes a
   listed path or anything under `.t12/`. turbo-12f lists its state
   machine, profile, sandbox, evidence and storage code, and its prompts.

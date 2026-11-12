@@ -12,18 +12,13 @@ import re
 import time
 
 from . import limits as limits_mod
+from . import profile as profile_mod
 from . import store
 from .errors import BudgetError, StateError
 
 VERSION = 1
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 PROVENANCE = "observed-helper-execution"
-
-# Roles that run as separate worker invocations. A session id may be
-# bound to exactly one role per run: the same worker cannot write the
-# tests and the implementation, or review its own code.
-SESSION_ROLES = ("test-writer", "builder", "qa", "reviewer", "security")
-REVIEW_ROLES = ("reviewer", "security")
 
 PHASES = (
     "unadmitted",
@@ -127,16 +122,29 @@ def bound_sessions(run):
         bound[record["session"]] = role
     for gate in run["gates"]:
         if gate.get("run_by"):
-            bound[gate["run_by"]] = "qa"
+            bound[gate["run_by"]] = gate.get("run_by_role", "qa")
     for review in run.get("reviews") or []:
         bound[review["session"]] = review["role"]
     return bound
 
 
+def role_kind(run, role):
+    """The kind of a role in the run's frozen role map."""
+    roles = run.get("role_map")
+    if roles is None:
+        raise StateError("this run was prepared before named roles; "
+                         "stop it and prepare it again with --supersede")
+    if role not in roles:
+        raise StateError(f"role {role!r} is not in this run; roles are {sorted(roles)}")
+    return roles[role]["kind"]
+
+
 def check_session(run, role, session):
     """One session per role per run. A session already bound to a
     different role cannot take this one — that would collapse the
-    separation the roles exist to enforce."""
+    separation the roles exist to enforce: the same worker cannot write
+    the tests and the implementation, or review its own code."""
+    role_kind(run, role)
     if not session or not str(session).strip():
         raise StateError(f"--session is required for the {role} role")
     bound = bound_sessions(run)
@@ -274,7 +282,7 @@ def open_escalation(run):
     return None
 
 
-def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
+def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
     defaults = defaults or limits_mod.BUILTIN_DEFAULTS
@@ -299,10 +307,11 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
     if not task.get("acceptance_criteria"):
         raise StateError("task must declare at least one acceptance criterion")
     required_reviews = task.get("required_reviews", ["reviewer"])
+    reviewers = profile_mod.review_roles(roles)
     if not isinstance(required_reviews, list) or any(
-            r not in REVIEW_ROLES for r in required_reviews):
+            r not in reviewers for r in required_reviews):
         raise StateError(
-            f"required_reviews must be a list of {list(REVIEW_ROLES)}: {required_reviews!r}"
+            f"required_reviews must be a list of review roles {reviewers}: {required_reviews!r}"
         )
     verify_deps = task.get("verify_deps", [])
     if not isinstance(verify_deps, list) or not all(_is_worktree_path(d) for d in verify_deps):
@@ -362,6 +371,7 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
         "probes": [],
         "sandbox_adapter": sandbox_adapter,
         "sandbox_image": sandbox_image,
+        "role_map": roles,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),
