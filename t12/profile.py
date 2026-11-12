@@ -19,7 +19,7 @@ an issue, so the profile is the floor:
   entry may overlap a protected path, since gates load deps from the
   builder's worktree.
 - budgets: the task wins.
-- protected_paths, security_review_paths, roles: profile only.
+- protected_paths, security_review_paths, roles, intake: profile only.
 
 Roles are names a project picks, each mapped to a kind the core
 enforces (see tools.TOOLS). The built-in roles are always present; a
@@ -97,8 +97,8 @@ TASK_KEYS = {
     "repair_cap": (int, _task_wins),
 }
 SCOPE_KEYS = ("protected_paths", "security_review_paths")
-PROFILE_ONLY = SCOPE_KEYS + ("roles",)
-OTHER_KEYS = ("version", "name", "roles")
+PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake")
+OTHER_KEYS = ("version", "name", "roles", "intake")
 
 
 def _paths(key, value):
@@ -143,6 +143,24 @@ def _roles(value):
     return roles
 
 
+def _intake(value):
+    """Where tasks come from. The core never reads it: the intake
+    adapter does. Validated here so a typo fails at `prepare`, not at
+    the next intake run."""
+    where = f"{PATH}: intake"
+    if not isinstance(value, dict) or set(value) - {"adapter", "repo", "label"}:
+        raise StateError(f"{where} must be an object of adapter, repo and label")
+    adapter, repo, label = value.get("adapter"), value.get("repo"), value.get("label")
+    if not isinstance(adapter, str) or not NAME_RE.match(adapter):
+        raise StateError(f"{where}: adapter must be a name matching {NAME_RE.pattern}")
+    if not isinstance(repo, str) or not re.fullmatch(r"[^\s/]+(/[^\s/]+)+", repo):
+        raise StateError(f"{where}: repo must look like owner/name")
+    if label is not None and (not isinstance(label, str) or not label.strip()):
+        raise StateError(f"{where}: label must be a non-empty string")
+    return {k: v for k, v in (("adapter", adapter), ("repo", repo), ("label", label))
+            if v is not None}
+
+
 def review_roles(roles):
     return sorted(name for name, spec in roles.items() if spec["kind"] == "review")
 
@@ -173,6 +191,8 @@ def parse(text):
     if text is not None:
         data.setdefault("verify_deps", [])
     data["roles"] = _roles(data.get("roles", {}))
+    if "intake" in data:
+        data["intake"] = _intake(data["intake"])
     reviewers = review_roles(data["roles"])
     unknown = [r for r in data.get("required_reviews", []) if r not in reviewers]
     if unknown:

@@ -49,6 +49,7 @@ def make_verified_home(tmp, adapter_fields=None):
 class FakeGitHub(BaseHTTPRequestHandler):
     SCENARIO = {}
     REQUESTS = []
+    BODIES = []
 
     def log_message(self, *args):
         pass
@@ -98,7 +99,7 @@ class FakeGitHub(BaseHTTPRequestHandler):
     def do_POST(self):
         path, _ = self._route()
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        self.BODIES.append(json.loads(self.rfile.read(length) or b"null"))
         self.REQUESTS.append(("POST", path))
         scenario = self.SCENARIO
         if path == "/repos/o/r/pulls":
@@ -209,6 +210,7 @@ class GitHubAdapterCase(AdapterCase):
     def github(self, home, scenario=None, extra=None):
         FakeGitHub.SCENARIO = scenario or {}
         FakeGitHub.REQUESTS = []
+        FakeGitHub.BODIES = []
         out = os.path.join(self.tmp.name, "report.json")
         args = ["create-pr", "--home", home, "--task-id", "demo-1",
                 "--repo", "o/r", "--out", out, "--api-base", self.api_base]
@@ -225,6 +227,35 @@ class GitHubAdapterCase(AdapterCase):
         self.assertEqual(data["ref"], "https://github.example/pr/7")
         posts = [r for r in FakeGitHub.REQUESTS if r[0] == "POST"]
         self.assertEqual(len(posts), 1)
+
+    def pr_body(self, source, extra=None):
+        tmp = tempfile.mkdtemp(dir=self.tmp.name)
+        home = make_verified_home(tmp, {"github_repo": "o/r", "source": source})
+        self.github(home, extra=extra)
+        return FakeGitHub.BODIES[0]["body"]
+
+    def test_pr_body_closes_a_same_repo_issue_and_links_its_source(self):
+        url = "https://github.example/o/r/issues/12"
+        body = self.pr_body({"adapter": "github-issues", "ref": "o/r#12", "url": url})
+        self.assertIn("\nCloses #12\n", body)
+        self.assertIn(f"\nSource: {url}\n", body)
+
+    def test_pr_body_only_links_an_issue_from_elsewhere(self):
+        url = "https://gitlab.example/g/p/-/issues/3"
+        for source in ({"adapter": "gitlab-issues", "ref": "g/p#3", "url": url},
+                       {"adapter": "github-issues", "ref": "other/repo#3", "url": url}):
+            body = self.pr_body(source)
+            self.assertNotIn("Closes", body)
+            self.assertIn(f"Source: {url}", body)
+
+    def test_pr_body_without_a_source_is_unchanged(self):
+        home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
+        self.github(home)
+        self.assertNotIn("Source:", FakeGitHub.BODIES[0]["body"])
+
+    def test_an_explicit_body_is_used_as_given(self):
+        source = {"adapter": "github-issues", "ref": "o/r#12"}
+        self.assertEqual(self.pr_body(source, ["--body", "mine"]), "mine")
 
     def test_existing_pr_matching_head_confirmed_without_create(self):
         home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
