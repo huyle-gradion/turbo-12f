@@ -1112,6 +1112,76 @@ class CliCase(unittest.TestCase):
         })
         self.assertEqual(self.run_record(home, "q-d")["base_commit"], candidate)
 
+    def act_in(self, home, task_id, role, session, output, expect=0):
+        path = os.path.join(self.tmp.name, f"act-{task_id}-{role}.json")
+        with open(path, "w") as fh:
+            json.dump(output, fh)
+        return self.t12("act", "--home", home, "--task-id", task_id, "--role", role,
+                        "--session", session, "--input", path, expect=expect)
+
+    def run_with_recurring_mistakes(self, home, task_id):
+        self.act_in(home, task_id, "reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "verification": "too early",
+            "findings": [{"id": "R0", "class": ["Bug"], "severity": "Blocker"}]}}, expect=1)
+        self.act_in(home, task_id, "test-writer", "sess-tw", {"tool": "red_test_ready", "args": {
+            "test_path": "tests/test_greet.py", "command": ["python3", "t.py"]}}, expect=1)
+        self.t12("escalate", "--home", home, "--task-id", task_id, "--question", "Which locale?")
+        self.t12("resume", "--home", home, "--task-id", task_id, "--answer", "en only")
+        wt = os.path.join(home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", task_id,
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-tw")
+        for app, expect in ((APP_WRONG, 1), (APP_V2, 0)):
+            with open(os.path.join(wt, "app.py"), "w") as fh:
+                fh.write(app)
+            self._git(wt, "commit", "-qam", "feat: implement greet")
+            self.t12("stage", "--home", home, "--task-id", task_id, "--session", "sess-builder")
+            self.t12("gate", "--home", home, "--task-id", task_id, "--name", "unit",
+                     "--session", "sess-qa", expect=expect)
+        self.t12("replay", "--home", home, "--task-id", task_id)
+        self.act_in(home, task_id, "reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "verification": "re-ran the gate",
+            "findings": [{"id": "R1", "class": "Verification miss", "severity": "Blocker",
+                          "where": "tests/test_greet.py:1", "finding": "no edge case",
+                          "owner": "qa"}]}})
+
+    def test_retro_proposes_a_check_for_each_recurring_lesson(self):
+        home = os.path.join(self.tmp.name, "home-retro")
+        self.t12("init", "--home", home, "--repo", self.repo)
+        for task_id in ("lesson-1", "lesson-2"):
+            path = os.path.join(self.tmp.name, f"{task_id}.json")
+            with open(path, "w") as fh:
+                json.dump(task_dict(task_id=task_id), fh)
+            self.t12("prepare", "--home", home, "--task", path)
+            self.run_with_recurring_mistakes(home, task_id)
+
+        def snapshot():
+            files = {}
+            for root, _, names in os.walk(home):
+                for name in names:
+                    with open(os.path.join(root, name), "rb") as fh:
+                        files[os.path.join(root, name)] = fh.read()
+            return files
+
+        before = snapshot()
+        report = json.loads(self.t12("retro", "--home", home, "--json", "--min", "2").stdout)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(report["gates"]["unit"]["failed_runs"], 2)
+        self.assertEqual(len(report["gates"]["unit"]["durations_s"]), 4)
+        kinds = {p["kind"]: p for p in report["proposals"]}
+        self.assertEqual(set(kinds), {"gate", "rejected-output", "finding", "escalation"})
+        self.assertIn("unit failed in 2 of 2 runs", kinds["gate"]["evidence"])
+        self.assertIn("Verification miss in 2 of 2", kinds["finding"]["evidence"])
+        self.assertEqual(report["runs_with_finding"], {"Verification miss": 2})
+        self.assertIn("Which locale?", kinds["escalation"]["evidence"])
+        self.assertIn("missing", kinds["rejected-output"]["evidence"])
+        text = self.t12("retro", "--home", home, "--min", "2").stdout
+        self.assertIn("Verification miss", text)
+        self.assertIn("changes nothing", text)
+
     def board(self):
         rows = json.loads(self.t12("board", "--home", self.home, "--json").stdout)
         return {row["task_id"]: row for row in rows}

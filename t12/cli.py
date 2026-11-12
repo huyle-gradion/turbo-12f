@@ -13,7 +13,7 @@ import sys
 import time
 
 from . import delivery as delivery_mod
-from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store, tools
+from . import evidence, gates as gate_mod, gitio, limits, model, retro, runner, sandbox, store, tools
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -489,6 +489,7 @@ def cmd_gate(args):
         run["budgets"]["repairs_used"] += 1
         _save(home, run, "gate-failed", {
             "step": gate["name"], "exit_code": obs["exit_code"],
+            "duration_s": obs["duration_s"],
             "output": (obs["stdout"] + obs["stderr"])[-4000:],
         })
         if run["budgets"]["repairs_used"] > run["budgets"]["repair_cap"]:
@@ -507,7 +508,7 @@ def cmd_gate(args):
         )
     gate["status"] = "passed"
     gate["observation"] = ref
-    _save(home, run, "gate-passed", {"gate": gate["name"]})
+    _save(home, run, "gate-passed", {"gate": gate["name"], "duration_s": obs["duration_s"]})
     if gate_mod.all_passed(run):
         print(f"gate {gate['name']}: passed — all gates passed, run replay next")
     else:
@@ -962,6 +963,18 @@ def cmd_board(args):
     return 0
 
 
+def cmd_retro(args):
+    home = _home(args)
+    _config(home)
+    data = retro.collect(home)
+    found = retro.proposals(data, args.min)
+    if args.json:
+        print(json.dumps(dict(data, home=home, proposals=found), indent=2, sort_keys=True))
+    else:
+        print(retro.report_text(home, data, found), end="")
+    return 0
+
+
 def cmd_calibrate(args):
     home = _home(args)
     data = limits.collect(home)
@@ -1142,6 +1155,12 @@ def build_parser():
     p = sub.add_parser("board", help="one row per run: phase, budget left, and who acts next")
     p.add_argument("--home", required=True); p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_board)
+
+    p = sub.add_parser("retro", help="recurring lessons across runs, each with a proposed check")
+    p.add_argument("--home", required=True); p.add_argument("--json", action="store_true")
+    p.add_argument("--min", type=int, default=retro.MIN_COUNT,
+                   help=f"how often a lesson must recur to be proposed (default {retro.MIN_COUNT})")
+    p.set_defaults(func=cmd_retro)
 
     p = sub.add_parser("calibrate"); p.add_argument("--home", required=True)
     p.add_argument("--apply", action="store_true",
