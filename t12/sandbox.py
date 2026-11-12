@@ -85,15 +85,19 @@ def is_forbidden_env_key(key):
 
 def verification_env(home, task_id):
     """Empty home for verification commands: no credential stores, no
-    global git config, temp files inside the state home."""
+    global git config, temp files inside the state home. The XDG
+    directories move with HOME: a host XDG_CONFIG_HOME would point git
+    at the operator's real config, which the cage then denies, and git
+    treats an unreadable config as fatal."""
     verify_home = os.path.join(home, "verify-home", task_id)
     store.mkdir_private(verify_home)
-    store.mkdir_private(os.path.join(verify_home, ".tmp"))
-    return {
-        "HOME": verify_home,
-        "TMPDIR": os.path.join(verify_home, ".tmp"),
-        "GIT_CONFIG_NOSYSTEM": "1",
-    }
+    env = {"HOME": verify_home, "GIT_CONFIG_NOSYSTEM": "1"}
+    for key, sub in (("TMPDIR", ".tmp"), ("XDG_CONFIG_HOME", ".config"),
+                     ("XDG_CACHE_HOME", ".cache"), ("XDG_DATA_HOME", ".local/share"),
+                     ("XDG_STATE_HOME", ".local/state")):
+        env[key] = os.path.join(verify_home, sub)
+        store.mkdir_private(env[key])
+    return env
 
 
 # ---------------------------------------------------------------- Landlock
