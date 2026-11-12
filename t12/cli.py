@@ -850,7 +850,7 @@ def cmd_verify(args):
             manifest_detail = f"issued to {detail['out']} (outside state home, not re-hashed)"
         else:
             recorded = detail.get("manifest_sha256") or detail.get("sha256")
-            path = os.path.join(home, "evidence", run["task_id"], "manifest.txt")
+            path = os.path.join(model.run_evidence_dir(home, run), "manifest.txt")
             if not recorded:
                 manifest_ok, manifest_detail = False, "issued event has no sha256"
             elif not os.path.exists(path):

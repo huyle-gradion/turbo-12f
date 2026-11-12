@@ -76,7 +76,14 @@ def untrusted_block(text):
 
 
 def manifest_text(home, task_id):
-    path = os.path.join(home, "evidence", task_id, "manifest.txt")
+    """The current run's manifest; a superseding run keeps its evidence
+    under its own evidence_key, so the archived run's is never read."""
+    run_path = os.path.join(home, "runs", f"{task_id}.json")
+    key = task_id
+    if os.path.isfile(run_path):
+        with open(run_path, encoding="utf-8") as fh:
+            key = json.load(fh).get("evidence_key") or task_id
+    path = os.path.join(home, "evidence", key, "manifest.txt")
     if not os.path.isfile(path):
         return ""
     with open(path, encoding="utf-8") as fh:
