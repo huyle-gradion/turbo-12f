@@ -109,10 +109,12 @@ _FS_WRITE_FILE = 1 << 1
 _FS_READ_FILE = 1 << 2
 _FS_READ_DIR = 1 << 3
 _FS_RW = (1 << 16) - 1
+_FS_RESOLVE_UNIX = 1 << 16  # connect to a pathname unix socket; ABI >= 9
 _FS_RO_DIR = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
 _FS_RO_FILE = _FS_EXECUTE | _FS_READ_FILE
 _FS_RW_FILE = _FS_EXECUTE | _FS_WRITE_FILE | _FS_READ_FILE
 _NET_TCP = 3  # bind + connect
+_SCOPE_ALL = 3  # abstract unix sockets + signals leaving the cage; ABI >= 6
 
 _SYSTEM_RO_DIRS = (
     "/usr", "/usr/local", "/bin", "/sbin", "/lib", "/lib64",
@@ -124,18 +126,22 @@ _DEV_RW_FILES = (
 )
 
 
-def landlock_available():
-    """True when this Linux kernel can deny TCP via Landlock (ABI >= 4)."""
+def landlock_abi():
+    """This kernel's Landlock ABI version, 0 when it has none."""
     if platform.system() != "Linux":
-        return False
+        return 0
     if platform.machine() not in ("x86_64", "aarch64"):
-        return False
+        return 0
     try:
         libc = ctypes.CDLL(None, use_errno=True)
-        abi = int(libc.syscall(_LANDLOCK_CREATE_RULESET, None, 0, 1))
-        return abi >= 4
+        return max(0, int(libc.syscall(_LANDLOCK_CREATE_RULESET, None, 0, 1)))
     except Exception:
-        return False
+        return 0
+
+
+def landlock_available():
+    """True when this Linux kernel can deny TCP via Landlock (ABI >= 4)."""
+    return landlock_abi() >= 4
 
 
 def detect_adapter():
@@ -231,12 +237,31 @@ def landlock_preexec(worktree, verify_home, read_only=()):
     verify-home writable, system dirs read-only, all TCP denied.
     Raises OSError in the child if the cage cannot be built, which
     the parent reports as a launch failure (fail closed)."""
-    worktree = os.path.realpath(worktree)
-    verify_home = os.path.realpath(verify_home)
+    return _landlock_preexec((worktree, verify_home), read_only,
+                             handled_fs=_FS_RW, handled_net=_NET_TCP, scoped=0)
+
+
+def builder_cage_preexec(writable, read_only=(), network=False):
+    """Build a preexec function that cages a builder: only `writable`
+    can be written, system dirs and `read_only` can be read, and TCP
+    is denied unless `network`. Where the kernel can, the child also
+    cannot signal a process outside the cage or connect to a unix
+    socket one listens on (the session bus, a container daemon).
+    Fails closed like `landlock_preexec`."""
+    abi = landlock_abi()
+    return _landlock_preexec(
+        writable, read_only,
+        handled_fs=_FS_RW | (_FS_RESOLVE_UNIX if abi >= 9 else 0),
+        handled_net=0 if network else _NET_TCP,
+        scoped=_SCOPE_ALL if abi >= 6 else 0)
+
+
+def _landlock_preexec(writable, read_only, handled_fs, handled_net, scoped):
+    writable = [os.path.realpath(path) for path in writable]
 
     def _preexec():
         libc = ctypes.CDLL(None, use_errno=True)
-        attr = struct.pack("<QQQ", _FS_RW, _NET_TCP, 0)
+        attr = struct.pack("<QQQ", handled_fs, handled_net, scoped)
         ruleset_fd = int(libc.syscall(
             _LANDLOCK_CREATE_RULESET, attr, len(attr), 0))
         if ruleset_fd < 0:
@@ -262,7 +287,7 @@ def landlock_preexec(worktree, verify_home, read_only=()):
                     _add_rule(path, _FS_RW_FILE)
             if os.path.isdir("/dev"):
                 _add_rule("/dev", _FS_RO_DIR)
-            for path in (worktree, verify_home):
+            for path in writable:
                 _add_rule(path, _FS_RW)
             for path in read_only:
                 _add_rule(path, _FS_RO_DIR if os.path.isdir(path) else _FS_RO_FILE)
