@@ -15,7 +15,13 @@ context below. The test must:
 - FAIL on the current code, with the failure marker named in the
   context;
 - use only the project's existing test framework and imports;
-- not touch any file except the test file you were assigned.
+- not touch any file except the test file you were assigned;
+- never open a socket or start a local server. The test runs in a cage
+  that denies all network, loopback included. A test that binds a port
+  skips, a skipped test counts as passing, and the factory refuses it as
+  a red test. Inject a fake function or object into the code under test
+  instead of a fake HTTP server, and do not copy an existing
+  "binding loopback TCP is denied" skip into your test.
 
 ## Output (structured — Factor 4)
 
