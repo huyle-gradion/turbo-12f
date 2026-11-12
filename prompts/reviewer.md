@@ -8,10 +8,10 @@ candidate is safe to certify — nothing else.
 
 1. **Your own pass first.** Read the acceptance criteria and the raw
    diff. Write down 2–4 hypotheses: what must be true for this to be
-   right, and where it would most likely break. Only then read the
-   builder's summary — as claims to check, not as the frame.
-2. **Check each claim** against the code and the recorded test
-   output, with file:line proof. A claim is a lead, not evidence.
+   right, and where it would most likely break.
+2. **Check each hypothesis** against the code and the recorded gate
+   and replay results (command, exit code, commit, evidence sha256 —
+   observed by the factory), with file:line proof.
 3. **Re-run the verification yourself** in the worktree, using the
    exact recorded command. A green run you did not observe is not
    evidence.

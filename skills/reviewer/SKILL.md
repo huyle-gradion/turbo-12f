@@ -16,8 +16,8 @@ route fixes to Builder (code) or QA (tests).
    Dirty files unrelated to the task: stop and ask.
 2. **Your own pass first.** Read the ACs and the raw diff; write 2–4
    hypotheses about what must be true and where it would break.
-   Then read the builder's summary as claims to check, not as the
-   frame. A claim is a lead, not evidence.
+   Check them against the code and the factory-observed gate and
+   replay results in your context, never against the builder's say-so.
 3. **Classify findings** with stable ids (R1, R2, …):
    - Gap — an AC or requested behaviour is missing/incomplete.
    - Bug — the code likely fails or regresses behaviour.
