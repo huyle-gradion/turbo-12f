@@ -2,10 +2,11 @@
 
 `t12-cage commit` checks the worktree's `.git` pointer once. A caged
 process that outlived the cage could rewrite the pointer after that
-check, so the cage returns only when every process it started is dead.
+check, so no caged process outlives `t12-cage`, however it ends.
 """
 
 import os
+import resource
 import signal
 import subprocess
 import time
@@ -18,7 +19,8 @@ from tests.test_cage import CAGE, CageCase
 
 # Leaves the cage's session and process group, then keeps appending
 # to a worktree file. Prints the detached pid before the cage's
-# command exits.
+# command exits. /proc is the host's, so /proc/self names the pid the
+# test can look up, which os.getpid() inside a PID namespace does not.
 DETACH = r"""
 import os, sys, time
 beat = sys.argv[1]
@@ -33,13 +35,49 @@ if os.fork():
 null = os.open(os.devnull, os.O_RDWR)
 for fd in (0, 1, 2):
     os.dup2(null, fd)
-os.write(write_end, str(os.getpid()).encode())
+os.write(write_end, os.readlink("/proc/self").encode())
 os.close(write_end)
 while True:
     with open(beat, "a") as fh:
         fh.write("x")
     time.sleep(0.05)
 """
+
+# Detaches like DETACH, records its pid in a worktree file, attacks the
+# process that started the command, then rewrites the worktree's .git
+# pointer after a delay. The command itself exits at once, or stays
+# for a while when the attack is "none".
+REWRITE_LATER = r"""
+import os, resource, sys, time
+attack, delay, pid_file = sys.argv[1], float(sys.argv[2]), sys.argv[3]
+parent = os.getppid()
+read_end, write_end = os.pipe()
+if os.fork():
+    os.close(write_end)
+    os.read(read_end, 1)
+    if attack == "none":
+        time.sleep(delay + 2)
+    sys.exit(0)
+os.setsid()
+if os.fork():
+    os._exit(0)
+null = os.open(os.devnull, os.O_RDWR)
+for fd in (0, 1, 2):
+    os.dup2(null, fd)
+with open(pid_file + ".tmp", "w") as fh:
+    fh.write(os.readlink("/proc/self"))
+os.rename(pid_file + ".tmp", pid_file)
+if attack != "none":
+    try:
+        resource.prlimit(parent, int(attack), (0, 0))
+    except OSError:
+        pass
+os.close(write_end)
+time.sleep(delay)
+with open(".git", "w") as fh:
+    fh.write("gitdir: /tmp/attacker\n")
+"""
+REWRITE_DELAY_S = 1.0
 
 
 def alive(pid):
@@ -89,6 +127,67 @@ class CageLifetimeTest(CageCase):
         self.assertEqual(proc.wait(timeout=30), 128 + signal.SIGTERM)
 
         self.assert_silent(pid, beat)
+
+    def read_pointer(self):
+        with open(os.path.join(self.worktree, ".git")) as fh:
+            return fh.read()
+
+    def start_rewriter(self, attack):
+        """Start t12-cage on REWRITE_LATER and return (t12-cage, the
+        detached process's pid)."""
+        pid_file = os.path.join(self.worktree, "rewriter.pid")
+        cage = subprocess.Popen(
+            [CAGE, "--home", self.home, "--task-id", "demo-1", "--",
+             "python3", "-c", REWRITE_LATER, str(attack), str(REWRITE_DELAY_S), pid_file],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=self.worktree,
+            # A killed t12-cage leaves its private temp dir behind.
+            env=dict(os.environ, TMPDIR=self.tmp.name))
+        self.addCleanup(cage.wait)
+        self.addCleanup(cage.kill)
+        deadline = time.monotonic() + 30
+        while not os.path.exists(pid_file):
+            self.assertLess(time.monotonic(), deadline, "the detached process never started")
+            time.sleep(0.01)
+        with open(pid_file) as fh:
+            pid = int(fh.read())
+        self.addCleanup(lambda: alive(pid) and os.kill(pid, signal.SIGKILL))
+        return cage, pid
+
+    def assert_pointer_survives(self, pointer, pid):
+        """The detached process is gone before it could rewrite the
+        pointer. Give it the time it needs to rewrite, so a process
+        that did outlive the cage shows in the pointer too."""
+        deadline = time.monotonic() + REWRITE_DELAY_S + 5
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.read_pointer(), pointer,
+                         "a process that outlived the cage rewrote the .git pointer")
+        self.assertFalse(alive(pid), "a detached process outlived the cage")
+
+    def assert_limit_on_the_parent_leaves_no_survivor(self, limit):
+        pointer = self.read_pointer()
+        cage, pid = self.start_rewriter(limit)
+
+        cage.wait(timeout=30)
+
+        self.assert_pointer_survives(pointer, pid)
+
+    def test_cpu_limit_on_the_parent_leaves_no_survivor(self):
+        # A zero CPU limit makes the kernel kill the process it is set on.
+        self.assert_limit_on_the_parent_leaves_no_survivor(resource.RLIMIT_CPU)
+
+    def test_open_file_limit_on_the_parent_leaves_no_survivor(self):
+        # A zero open-file limit fails any cleanup that opens a file.
+        self.assert_limit_on_the_parent_leaves_no_survivor(resource.RLIMIT_NOFILE)
+
+    def test_killing_the_cage_leaves_no_survivor(self):
+        pointer = self.read_pointer()
+        cage, pid = self.start_rewriter("none")
+
+        cage.kill()
+        cage.wait(timeout=30)
+
+        self.assert_pointer_survives(pointer, pid)
 
     def test_git_status_works_despite_an_unreadable_user_config(self):
         # A user exclude file the cage may not read: git dies on it.

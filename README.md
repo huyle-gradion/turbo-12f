@@ -275,14 +275,28 @@ so the cage does not stop data from leaving. Git inside the cage
 reads no global config, and the `XDG_*_HOME` directories point into
 the private temp dir, because your own are not readable there.
 
-`t12-cage` returns only after every process the command started is
-dead, including one that detached with a double fork and `setsid`.
-`SIGINT`, `SIGTERM`, and `SIGHUP` stop it the same way. `SIGKILL`
-does not: the command's processes keep running in the cage.
+The command runs in its own PID namespace. No process it started
+outlives `t12-cage`, including one that detached with a double fork
+and `setsid`: the kernel kills them all when `t12-cage` returns, when
+`SIGINT`, `SIGTERM`, or `SIGHUP` stops it, and when it is killed with
+`SIGKILL`. After a `SIGKILL` they die a moment later, and the private
+temp dir stays behind. The command cannot signal or limit a process
+outside the namespace. Tools that read `/proc`, such as `ps`, still
+list the host's processes there, under pids that mean nothing inside
+the cage.
 
-The cage needs Linux with Landlock ABI 5 or later (kernel 6.10).
-When no cage can be applied, `t12-cage` exits non-zero and does not
-run the command.
+The cage needs Linux with Landlock ABI 5 or later (kernel 6.10) and
+unprivileged user namespaces, which a PID namespace requires. Some
+hosts turn those off (`kernel.unprivileged_userns_clone=0`,
+`user.max_user_namespaces=0`, Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=1`, Docker's default
+seccomp profile). When either is missing, `t12-cage` exits non-zero
+and does not run the command. The user namespace maps only your own
+uid and gid, so files owned by anyone else show as `nobody`. Inside
+another Landlock cage that makes `/proc` read-only, as in this repo's
+own gates, `t12-cage` cannot write that map. It says so on stderr and
+the command then sees uid 65534 for itself and for every file. File
+access is the same either way.
 
 | Option | Effect |
 |---|---|
@@ -292,7 +306,7 @@ run the command.
 
 A linked worktree keeps its index and refs in the shared `.git`, so
 a caged builder cannot commit. Run `t12-cage commit` yourself,
-outside the cage, after `t12-cage` returns. It commits every change in
+outside the cage, after `t12-cage` ends. It commits every change in
 the worktree on the run's branch. It refuses when the worktree's
 `.git` pointer file is not the one `prepare` wrote, or when the
 worktree contains a nested git repository. It passes git the git dir

@@ -50,21 +50,38 @@ enforces; this file states what it does *not* claim.
   `.pth` file in the verify home. What stays open:
   - Nothing forces the cage. `t12` cannot tell a caged builder from
     an uncaged one, and the run record does not say which it was.
+    Deferred to
+    [#17](https://github.com/huyle-gradion/turbo-12f/issues/17).
   - The worktree's `.git` pointer file is writable inside the cage.
     Only `t12-cage commit` checks it. `t12 stage` and the gates run
     git in the worktree without that check. Run `t12-cage commit`
-    after `t12-cage` returns and before any `t12` command, and stop
-    the run when it refuses.
-  - `t12-cage` kills every process the builder started before it
-    returns, including one that left its session with a double fork
-    and `setsid`, so nothing caged is left to rewrite the pointer
-    after the check. This fails when `t12-cage` itself dies from
-    `SIGKILL`: the builder's processes then keep running in the cage.
-    Do not commit a run whose `t12-cage` was killed that way.
+    after `t12-cage` ends and before any `t12` command, and stop the
+    run when it refuses. Deferred to
+    [#17](https://github.com/huyle-gradion/turbo-12f/issues/17).
+  - No caged process outlives `t12-cage`, so nothing caged is left
+    to rewrite the pointer after the check. `t12-cage` runs the
+    command in a new PID namespace, and the kernel kills every
+    process in that namespace when `t12-cage` ends: when it returns,
+    when a signal stops it, and when it is killed with `SIGKILL`.
+    This does not depend on `t12-cage` running any cleanup. Inside
+    the namespace no pid names a process outside it, so the builder
+    cannot signal `t12-cage` or the operator's other processes or
+    set a resource limit on them. It can kill the namespace's first
+    process, which ends its own run. What stays open:
+    - After a `SIGKILL` the kernel kills the caged processes a
+      moment after `t12-cage` is gone, not before. Wait for the
+      worktree to go quiet before `t12-cage commit`. The private temp
+      dir is left behind.
+    - An unprivileged process gets a PID namespace only with a user
+      namespace. `t12-cage` refuses to start on a host that forbids
+      unprivileged user namespaces. The user namespace maps only the
+      operator's uid and gid, to themselves. The command holds no
+      capability in it, and Landlock still denies every mount.
+    - `/proc` is still the host's. The builder can list the
+      operator's processes and read their command lines.
   - On a kernel older than Landlock ABI 9 the builder can connect to
     a unix socket outside the cage (the session bus, a container
-    daemon) and ask its owner to write for it. Older than ABI 6, it
-    can also signal the operator's processes.
+    daemon) and ask its owner to write for it.
   - A path the operator adds with `--write` is outside the claim. A
     writable agent config directory lets the builder leave
     instructions for the next uncaged agent.
