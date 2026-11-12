@@ -7,7 +7,8 @@ What the core enforces, deterministically:
 - Verification commands (red / gate / replay / probe) run with an
   empty verify-home and, where the OS supports it, under a Landlock
   sandbox: worktree + verify-home writable, system dirs read-only,
-  all TCP denied.
+  all TCP denied, and no unix socket or signal reaching a process
+  outside the sandbox (Landlock ABI 9; older kernels fail the probe).
 
 What it does NOT claim: on a host with no sandbox adapter, nothing
 above stops a subprocess from reaching the network or the rest of
@@ -22,8 +23,10 @@ import os
 import platform
 import re
 import shutil
+import socket
 import struct
 import subprocess
+import tempfile
 
 from . import evidence, store
 from .errors import RunnerError, StateError
@@ -66,6 +69,8 @@ FORBIDDEN_ENV_EXACT = frozenset({
     "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE",
     "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS",
+    "NOTIFY_SOCKET", "GPG_AGENT_INFO", "DOCKER_HOST", "WAYLAND_DISPLAY", "DISPLAY",
 })
 
 FORBIDDEN_ENV_PATTERNS = (
@@ -237,12 +242,11 @@ def docker_run_argv(image, worktree, verify_home, env, argv, read_only=()):
 
 
 def landlock_preexec(worktree, verify_home, read_only=()):
-    """Build a preexec function that cages the child: worktree and
-    verify-home writable, system dirs read-only, all TCP denied.
-    Raises OSError in the child if the cage cannot be built, which
-    the parent reports as a launch failure (fail closed)."""
-    return _landlock_preexec((worktree, verify_home), read_only,
-                             handled_fs=_FS_RW, handled_net=_NET_TCP, scoped=0)
+    """Build a preexec function that cages a verification command:
+    the builder's cage with worktree and verify-home writable and all
+    TCP denied. Raises OSError in the child if the cage cannot be
+    built, which the parent reports as a launch failure (fail closed)."""
+    return builder_cage_preexec((worktree, verify_home), read_only, network=False)
 
 
 def builder_cage_preexec(writable, read_only=(), network=False):
@@ -334,6 +338,14 @@ _EXTERNAL_PROBE = """
 import os, socket, sys
 outside = sys.argv[1]
 granted = []
+for path in sys.argv[2:]:
+    try:
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.settimeout(3)
+            sock.connect(path.replace("@", "\\0", 1) if path.startswith("@") else path)
+        granted.append("unix:" + path)
+    except OSError:
+        pass
 try:
     socket.create_connection(("8.8.8.8", 53), timeout=3)
     granted.append("network")
@@ -354,13 +366,28 @@ sys.exit(0)
 """
 
 
-def probe_commands(sentinel_path, outside_path):
+_HOST_SOCKETS = (
+    "/var/run/docker.sock", "/run/docker.sock", "/run/podman/podman.sock",
+    "/run/dbus/system_bus_socket", "/run/user/{uid}/bus",
+    "/run/user/{uid}/docker.sock", "/run/user/{uid}/podman/podman.sock",
+    "/run/user/{uid}/gnupg/S.gpg-agent", "/run/user/{uid}/systemd/private",
+)
+
+
+def probe_commands(sentinel_path, outside_path, sockets=()):
     return [
         ("forbidden_credential_access",
          ["python3", "-c", _CREDENTIAL_PROBE, sentinel_path]),
         ("external_effect_restriction",
-         ["python3", "-c", _EXTERNAL_PROBE, outside_path]),
+         ["python3", "-c", _EXTERNAL_PROBE, outside_path, *sockets]),
     ]
+
+
+def _listen(address):
+    sock = socket.socket(socket.AF_UNIX)
+    sock.bind(address)
+    sock.listen(1)
+    return sock
 
 
 def probes_passed(probes):
@@ -382,13 +409,24 @@ def run_probes(home, run, execute):
     # ephemeral /tmp under Docker (writable, and therefore not a
     # test of confinement at all).
     outside = os.path.join(home, "probe-outside.txt")
+    # Sockets the probe must not reach: the host's well-known ones, a
+    # pathname one listening outside the cage (the state home's path
+    # can be past the 108-byte socket limit, so a fresh temp dir), and
+    # an abstract one, which no file rule covers.
+    sockets = [path.format(uid=os.getuid()) for path in _HOST_SOCKETS]
+    sockets = [path for path in sockets if os.path.exists(path)]
+    listen_dir = tempfile.mkdtemp(prefix="t12-probe-")
+    planted = os.path.join(listen_dir, "s")
+    abstract = os.path.basename(listen_dir)
+    listeners = [_listen(planted), _listen("\0" + abstract)]
+    sockets += [planted, "@" + abstract]
     adapter = run.get("sandbox_adapter") or detect_adapter()
     sandbox_ctx = {"worktree": worktree, "verify_home": venv["HOME"],
                    "adapter": adapter, "image": run.get("sandbox_image")}
     os.environ["T12_PROBE_SECRET"] = "canary"
     try:
         results = []
-        for name, argv in probe_commands(sentinel, outside):
+        for name, argv in probe_commands(sentinel, outside, sockets):
             obs = execute(argv, cwd=worktree, timeout_s=15, env=venv,
                           sandbox=sandbox_ctx)
             detail = ""
@@ -417,3 +455,6 @@ def run_probes(home, run, execute):
         return results
     finally:
         os.environ.pop("T12_PROBE_SECRET", None)
+        for sock in listeners:
+            sock.close()
+        shutil.rmtree(listen_dir, ignore_errors=True)
