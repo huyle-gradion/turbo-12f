@@ -652,6 +652,37 @@ class CliCase(unittest.TestCase):
         result = self.t12("verify", "--home", self.home, "--task-id", "demo-1", expect=1)
         self.assertIn("FAIL evidence-refs", result.stdout + result.stderr)
 
+    def red_test_context(self, role):
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", role, "--phase", "gates")
+        prompt, data = result.stdout.split("--- context (JSON) ---\n", 1)
+        return prompt, json.loads(data)["red_test"]
+
+    def test_context_names_the_red_test_from_the_run_record(self):
+        for role in ("test-writer", "builder", "reviewer"):
+            self.assertIsNone(self.red_test_context(role)[1], role)
+        self.do_red()
+        red = self.run_record()["red"]
+        expected = {"test_path": red["test_path"], "command": red["command"],
+                    "marker": red["marker"], "commit": red["commit"]}
+        self.assertEqual(expected["test_path"], "tests/test_greet.py")
+        self.assertIsInstance(expected["command"], list)
+        for role in ("test-writer", "builder", "reviewer"):
+            self.assertEqual(self.red_test_context(role)[1], expected, role)
+        self.do_implement_and_stage()
+        self.write_worktree("app.py", APP_V2 + "# note: re-staged\n")
+        self.commit_worktree("feat: note")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        for role in ("test-writer", "builder", "reviewer"):
+            self.assertEqual(self.red_test_context(role)[1], expected, role)
+
+    def test_builder_prompt_names_the_red_test_field(self):
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", "builder", "--phase", "red")
+        prompt = result.stdout.split("--- context (JSON) ---\n", 1)[0]
+        self.assertIn("`red_test`", prompt)
+        self.assertNotIn("Read the failing test first", prompt)
+
     def test_context_shows_roles_and_prior_review(self):
         self.do_red()
         self.do_implement_and_stage()
