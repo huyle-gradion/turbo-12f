@@ -450,10 +450,26 @@ def _short_test_name(name):
 _FAILURE_WORD = re.compile(r"(?<!\w)(?:FAIL|FAILED|ERROR|not ok)(?!\w)")
 
 
+def _defines_test(name, source):
+    """True when the source defines a function with the test's short name."""
+    short = re.escape(_short_test_name(name))
+    return re.search(rf"^\s*(?:async\s+)?def\s+{short}\s*\(", source, re.M) is not None
+
+
+def _names_test(name, line):
+    """True when the line names the test. A qualified name (Class.method or
+    path::Class::method) must appear qualified, in either separator style,
+    so a test cannot borrow the failure of a same-named method elsewhere."""
+    parts = [re.escape(p) for p in re.split(r"::|\.", name) if p]
+    if len(parts) == 1:
+        return _named(name, line)
+    joined = r"(?:\.|::)".join(parts)
+    return re.search(rf"(?<![\w]){joined}(?!\w)", line) is not None
+
+
 def _reported_failing(name, output):
     """True when a line of the runner's output names the test and marks it failed."""
-    short = _short_test_name(name)
-    return any(_named(short, line) and _FAILURE_WORD.search(line)
+    return any(_names_test(name, line) and _FAILURE_WORD.search(line)
                for line in output.splitlines())
 
 
@@ -486,7 +502,7 @@ def cmd_red(args):
     covered = sorted({t for tests in covers.values() for t in tests})
     commit = gitio.commit_with_path(wt, test_path, f"test({run['task_id']}): red test")
     test_source = gitio.file_at(wt, commit, test_path)
-    absent = [t for t in covered if not _named(_short_test_name(t), test_source)]
+    absent = [t for t in covered if not _defines_test(t, test_source)]
     if absent:
         raise StateError(f"refusing red: covers names tests not in the red commit's {test_path}: {absent}")
     obs = _run_on_commit(home, run, wt, commit, command)
