@@ -261,6 +261,19 @@ class ProfileTest(unittest.TestCase):
             with self.assertRaises(StateError, msg=bad):
                 profile.apply(base, bad)
 
+    def test_intake_is_validated_and_only_the_profile_may_set_it(self):
+        intake = {"adapter": "github-issues", "repo": "o/r", "label": "factory"}
+        self.assertEqual(self.profile(intake=intake)["intake"], intake)
+        self.assertEqual(self.profile(intake={"adapter": "gitlab-issues", "repo": "g/s/p"})["intake"],
+                         {"adapter": "gitlab-issues", "repo": "g/s/p"})
+        for bad in ("github-issues", {}, dict(intake, token="x"), dict(intake, repo="o"),
+                    dict(intake, repo="o r/x"), dict(intake, adapter="../x"),
+                    dict(intake, label=""), dict(intake, label=3)):
+            with self.assertRaises(StateError, msg=bad):
+                self.profile(intake=bad)
+        with self.assertRaises(StateError):
+            profile.apply(self.profile(), {"intake": intake})
+
     def test_the_task_sets_its_own_budget(self):
         merged = profile.apply(self.profile(op_limit=9), {"op_limit": 40})
         self.assertEqual(merged["op_limit"], 40)
