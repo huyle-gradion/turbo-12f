@@ -256,6 +256,37 @@ intake: {"adapter": "evil"}
         self.assertEqual(self.task("gh-1.json")["id"], "gh-1")
         self.assertFalse(os.path.islink(os.path.join(self.out, "gh-1.json")))
 
+    def test_an_issue_no_longer_listed_is_withdrawn_from_the_queue(self):
+        home = os.path.join(self.tmp.name, "state")
+        os.makedirs(os.path.join(home, "runs"))
+        self.intake([issue(1), issue(2), issue(3)], ["--label", "factory"])
+        others = {
+            "gh-5.json": {"id": "gh-5", "source": {"adapter": "github-issues", "ref": "other/repo#5"}},
+            "gl-6.json": {"id": "gl-6", "source": {"adapter": "gitlab-issues", "ref": "o/r#6"}},
+            "hand-1.json": {"id": "hand-1", "title": "by hand"},
+        }
+        for name, data in others.items():
+            with open(os.path.join(self.out, name), "w") as fh:
+                json.dump(data, fh)
+        with open(os.path.join(home, "runs", "gh-3.json"), "w") as fh:
+            fh.write("{}")
+        before = self.files()
+
+        self.intake([issue(1)], ["--label", "factory", "--home", home],
+                    scenario={"fail_page": 1}, expect=1)
+        self.assertEqual(self.files(), before)
+
+        result = self.intake([issue(1)], ["--label", "factory", "--home", home])
+        self.assertEqual(self.files(), ["gh-1.json", "gh-3.json", "gh-5.json",
+                                        "gl-6.json", "hand-1.json"])
+        self.assertIn(f"withdrawn gh-2: {os.path.join(self.out, 'gh-2.json')}",
+                      result.stdout.splitlines())
+        self.assertIn("has-run gh-3", result.stdout)
+
+        result = self.intake([], ["--label", "factory"])
+        self.assertEqual(self.files(), ["gh-5.json", "gl-6.json", "hand-1.json"])
+        self.assertIn("withdrawn gh-3", result.stdout)
+
     def test_a_failed_listing_writes_nothing_and_fails(self):
         for status in (403, 500, 502):
             result = self.intake([issue(1)], ["--label", "factory"],

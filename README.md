@@ -258,13 +258,27 @@ optional `touches` and `depends_on`, and
 `source: {"adapter", "ref", "url"}`. Gates, reviews, sandbox and
 everything else the profile controls never come from an issue, and
 re-running intake changes nothing that is unchanged or already has a
-run. GitLab works the same through `adapters/gitlab-issues.py`. The
-formats and failure rules are in `adapters/README.md`; the core
-never touches the network or holds a token.
+run. Text inside an HTML comment is ignored, because the forge does
+not show it to the maintainer who applies the label. When an issue
+loses its label or closes, the next intake run deletes its queued
+task file, unless the task already has a run. GitLab works the same
+through `adapters/gitlab-issues.py`. The formats and failure rules
+are in `adapters/README.md`; the core never touches the network or
+holds a token.
+
+Two limits remain. The issue author can edit the body after the
+label is applied, and the next intake run picks up the edit: the
+label approves the author, not one version of the text. And if
+writing a task file fails partway through a run, the queue can hold
+some of that run's tasks and not others; run intake again once the
+cause is fixed.
 
 `prepare` records `source` in the run record. The GitHub delivery
 adapter then puts the source link in the pull request body, with
 `Closes #N` when the issue is in the same repo, so merging closes it.
+The title and criteria appear in the body inside a code block with
+issue references broken, so an issue author cannot close other
+issues or hide part of the body.
 
 ## Running several tasks at once
 

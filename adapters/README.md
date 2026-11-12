@@ -67,7 +67,8 @@ bin/t12-queue --home <state-home> --queue <queue dir> --max 3
 
 Each writes one `<id>.json` per usable issue into the directory
 `bin/t12-queue` reads, then prints one line per issue:
-`wrote`, `unchanged`, `skipped` (with the reason), or `has-run`.
+`wrote`, `unchanged`, `skipped` (with the reason), or `has-run`, and
+one `withdrawn` line per task file it deletes.
 `github-issues` makes ids `gh-<number>`, `gitlab-issues` `gl-<iid>`.
 `GITLAB_URL` defaults to `https://gitlab.com`; the GitLab `--repo` is
 the project path, subgroups included.
@@ -118,8 +119,22 @@ in `--home`, which is then left alone. Without `--home` intake cannot
 see runs, so pass it whenever a state home exists. A file in the
 queue directory is overwritten only if its `source` names the same
 adapter and the same `owner/name#number`; ids repeat across repos, so
-`gh-1` from another repo is skipped with the reason printed. Intake
-never deletes files: remove the file of a closed issue yourself.
+`gh-1` from another repo is skipped with the reason printed.
+
+**Withdrawing.** After a complete listing, intake deletes each task
+file in the queue directory whose `source` names this adapter and
+this repo but whose issue was not listed: a maintainer removed the
+label, or the issue was closed. It prints `withdrawn <id>: <path>`.
+A task with a run in `--home` is left alone. A failed listing
+deletes nothing.
+
+**Limits.** The issue author can still edit the body after a
+maintainer applies the label, and the next intake run picks up the
+edit, unless the task already has a run. Remove the label from an
+issue whose author you do not trust to leave it alone. A write error
+partway through a run (a full disk, a permission error) can leave
+some task files written and others not; run intake again once the
+error is fixed.
 
 **Failure.** Intake writes no outcome report, so a failed run must
 not look complete. It lists every page before it writes. A 403, 5xx or

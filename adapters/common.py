@@ -179,6 +179,8 @@ def write_report(path, data):
 # the core would refuse at `prepare` is skipped here, with the reason.
 # Intake writes no outcome report, so a failed listing writes nothing
 # and exits non-zero; a half-written queue must not look complete.
+# Only a complete listing withdraws a task, because only it shows that
+# an issue lost its label.
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
@@ -359,7 +361,8 @@ def _write_if_changed(out_dir, task, adapter):
 
 
 def sync(issues, adapter, repo, id_prefix, out_dir, home):
-    """Write one task file per usable issue; one printed line each."""
+    """Write one task file per usable issue and withdraw the tasks of
+    issues no longer listed; one printed line each."""
     os.makedirs(out_dir, exist_ok=True)
     for issue in sorted(issues, key=lambda i: i["number"]):
         task_id, task, problem = issue_to_task(issue, adapter, repo, id_prefix)
@@ -370,6 +373,31 @@ def sync(issues, adapter, repo, id_prefix, out_dir, home):
         else:
             verdict, detail = _write_if_changed(out_dir, task, adapter)
             print(f"{verdict} {task_id}: {detail}")
+    _withdraw({f"{repo}#{i['number']}" for i in issues}, adapter, repo, out_dir, home)
+
+
+def _withdraw(listed, adapter, repo, out_dir, home):
+    """Delete this repo's queued tasks whose issue the complete listing
+    no longer holds: the label was removed or the issue closed."""
+    for entry in sorted(os.scandir(out_dir), key=lambda e: e.name):
+        if not entry.name.endswith(".json") or not entry.is_file(follow_symlinks=False):
+            continue
+        task_id = entry.name[:-len(".json")]
+        try:
+            with open(entry.path, encoding="utf-8") as fh:
+                task = json.load(fh)
+            source = task.get("source") or {}
+            owner, ref = source.get("adapter"), str(source.get("ref"))
+        except (OSError, ValueError, AttributeError):
+            continue
+        if (owner != adapter or task.get("id") != task_id
+                or ref.rpartition("#")[0] != repo or ref in listed):
+            continue
+        if _has_run(home, task_id):
+            print(f"has-run {task_id}: no longer listed, left alone, a run exists in {home}")
+            continue
+        os.unlink(entry.path)
+        print(f"withdrawn {task_id}: {entry.path}")
 
 
 def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=None):
