@@ -6,12 +6,26 @@ re-run changes nothing, and a failed listing writes nothing.
 
 import json
 import os
+import socket
 import subprocess
 import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
+
+
+def _loopback_denied():
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+    except PermissionError:
+        return True
+    return False
+
+
+CAGED = "binding loopback TCP is denied here, as inside a t12 verification cage"
+LOOPBACK_DENIED = _loopback_denied()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOOD_BODY = """Greeting is wrong.
@@ -71,6 +85,8 @@ class FakeIssues(BaseHTTPRequestHandler):
 
 class IntakeCase(unittest.TestCase):
     def setUp(self):
+        if LOOPBACK_DENIED:
+            self.skipTest(CAGED)
         self.tmp = tempfile.TemporaryDirectory()
         self.out = os.path.join(self.tmp.name, "queue")
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeIssues)
