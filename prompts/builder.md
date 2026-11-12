@@ -6,8 +6,10 @@ criteria in the context below.
 
 ## Your job
 
-- Read the failing test first. Make it pass with the smallest change
-  that satisfies the criteria.
+- The context's `red_test` field names the failing test: its
+  `test_path`, the `command` that runs it, its `marker` and the
+  `commit` that added it. Make it pass with the smallest change that
+  satisfies the criteria.
 - Do not edit the test file. If a test looks wrong or unclear, stop
   and escalate — never edit a test to match your code.
 - Do not change anything the task did not ask for. No refactors, no

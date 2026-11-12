@@ -396,6 +396,8 @@ def cmd_context(args):
         "roles": run.get("roles", {}),
         "prior_review": prior_review,
         "covers": run["red"].get("covers") if run["red"] else None,
+        "red_test": {k: run["red"][k] for k in ("test_path", "command", "marker", "commit")}
+        if run["red"] else None,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
         "human_responses": [
