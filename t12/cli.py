@@ -362,6 +362,19 @@ def cmd_context(args):
                     "voided": review["voided"],
                 }
                 break
+    elif kind == "builder":
+        review = model.changes_requested(run)
+        if review is not None:
+            with open(review["report"]["path"], encoding="utf-8", errors="replace") as fh:
+                findings = fh.read()[-4000:]
+            prior_review = {
+                "role": review["role"],
+                "verdict": review["verdict"],
+                "commit": review["commit"],
+                "report": review["report"]["name"],
+                "report_path": review["report"]["path"],
+                "findings": findings,
+            }
     context = {
         "task_id": run["task_id"],
         "title": run["title"],
@@ -474,6 +487,18 @@ def cmd_stage(args):
     if not gitio.is_clean(wt):
         raise StateError("refusing stage: worktree has uncommitted changes")
     candidate = gitio.head(wt)
+    review = model.changes_requested(run)
+    if review is not None and candidate == review["commit"]:
+        model.bump_op(run)
+        _save(home, run, "stage-refused", {
+            "reason": "no new commit after changes requested",
+            "review": review["report"]["name"], "commit": candidate[:12],
+        })
+        raise StateError(
+            f"refusing stage: the {review['role']} review ({review['report']['name']}) "
+            f"asked for changes on {candidate[:12]} and no new commit was made — "
+            "address its findings, commit, then stage"
+        )
     if candidate == run["red"]["commit"]:
         raise StateError("refusing stage: no implementation commit after the red commit")
     if not gitio.is_ancestor(wt, run["red"]["commit"], candidate):
@@ -647,10 +672,26 @@ def cmd_review(args):
         "voided_reason": None,
         "at": time.time(),
     })
+    # Each changes-requested round is one repair, so a builder that
+    # cannot satisfy the reviewer (or a finding the builder does not
+    # own) stops at the cap instead of looping review forever.
+    if args.verdict == "changes-requested":
+        run["budgets"]["repairs_used"] += 1
     _save(home, run, "reviewed", {
         "role": role, "verdict": args.verdict,
         "commit": run["candidate"]["commit"][:12],
     })
+    if args.verdict == "changes-requested":
+        if run["budgets"]["repairs_used"] > run["budgets"]["repair_cap"]:
+            run["phase"] = "stopped"
+            run["stop_reason"] = "repair-cap"
+            model.record_measurements(run)
+            _save(home, run, "stopped", {"reason": "repair-cap", "review": ref["name"]})
+            raise StateError(
+                f"{role} requested changes ({ref['name']}) and the repair cap "
+                f"({run['budgets']['repair_cap']}) is exceeded; run stopped — "
+                f"the unresolved findings are in {ref['name']}"
+            )
     print(f"review: {role} {args.verdict} on {run['candidate']['commit'][:12]}")
     return 0
 

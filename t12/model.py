@@ -178,6 +178,19 @@ def latest_review(run, role, commit=None):
     return None
 
 
+def changes_requested(run):
+    """The changes-requested review that stands on the current
+    candidate (the latest non-voided review of a required role), or None."""
+    candidate = (run.get("candidate") or {}).get("commit")
+    if not candidate:
+        return None
+    for role in run.get("required_reviews") or []:
+        review = latest_review(run, role, commit=candidate)
+        if review is not None and review["verdict"] == "changes-requested":
+            return review
+    return None
+
+
 def check_reviews(run):
     """Green requires an approving review for every required role, on
     the current candidate. A changes-requested review newer than the
