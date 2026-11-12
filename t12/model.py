@@ -388,6 +388,8 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
         "escalations": [],
         "deliveries": [],
         "github_repo": task.get("github_repo"),
+        "gitlab_project": task.get("gitlab_project"),
+        "bitbucket_repo": task.get("bitbucket_repo"),
         "asana_task_gid": task.get("asana_task_gid"),
     }
 

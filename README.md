@@ -60,7 +60,7 @@ The core never touches the network. Adapters do the remote work and
 write a report; `t12 deliver` records it:
 
 ```bash
-export GITHUB_TOKEN=...   # or ASANA_TOKEN for the Asana adapter
+export GITHUB_TOKEN=...   # or GITLAB_TOKEN, BITBUCKET_TOKEN, ASANA_TOKEN
 python3 adapters/github.py create-pr --home /path/to/state-home \
   --task-id demo-1 --out delivery.json
 bin/t12 deliver --home /path/to/state-home --task-id demo-1 \
@@ -73,6 +73,15 @@ Outcomes: `confirmed` (remote read back and matching), `rejected`
 delivery for that adapter until a read-back report is recorded
 with `--resolves` — never retry the action blind. The adapter
 never merges; a human merges the PR. See `adapters/README.md`.
+
+Any forge works the same way. `adapters/github.py create-pr`,
+`adapters/gitlab.py create-mr` (merge request, `GITLAB_URL` for
+self-hosted) and `adapters/bitbucket.py create-pr` (Bitbucket Cloud)
+share one contract: find or create the change request for the
+branch, read it back, and compare its head to the reviewed
+candidate. Record the report with `--adapter github|gitlab|bitbucket`.
+The target comes from the task's `github_repo`, `gitlab_project` or
+`bitbucket_repo` field, a flag, or the origin remote.
 
 `local-verified` means the configured evidence chain was observed and
 is internally consistent. It is not acceptance and not permission to
@@ -94,7 +103,7 @@ merge — a human merges.
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |
-| `deliver` | Record an adapter's report as evidence: `--adapter github\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
+| `deliver` | Record an adapter's report as evidence: `--adapter github\|gitlab\|bitbucket\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
 | `board` | One row per run: phase, candidate, budget left, whether a command is running on it, and who acts next (`--json` for scripts) |
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
 | `retro` | Lessons that recur across runs (gate failures and suite time per gate, rejected worker outputs, review finding classes, repeated escalations), each with a proposed check; changes nothing (`--min N`, `--json`) |

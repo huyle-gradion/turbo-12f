@@ -20,7 +20,7 @@ code and only change by editing the factory:
 | Worker tools | `TOOLS` in `t12/tools.py`, keyed by role name |
 | Prompts and skills | `prompts/<role>.md` and `skills/<role>/` in the factory checkout |
 | Task intake | hand-written `task.json` only; every task repeats gates, sandbox, `verify_deps` |
-| Delivery | `ADAPTERS` in `t12/delivery.py`; GitHub and Asana scripts only |
+| Delivery | `ADAPTERS` in `t12/delivery.py`; GitHub, GitLab, Bitbucket and Asana scripts |
 
 chat-bridge works around this with its own in-repo factory
 (`chat-bridge/factory/`), which hardcodes `PROTECTED_PATHS`, its

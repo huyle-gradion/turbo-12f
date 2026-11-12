@@ -25,13 +25,12 @@ Outcome rules:
 import argparse
 import os
 import re
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    manifest_text, mutation_outcome, read_outcome, read_run, report,
-    request, write_report,
+    change_request_body, mutation_outcome, origin_url, read_outcome, read_run,
+    report, request, write_report,
 )
 
 
@@ -48,14 +47,7 @@ def resolve_repo(run, explicit):
         return explicit
     if run.get("github_repo"):
         return run["github_repo"]
-    try:
-        url = subprocess.run(
-            ["git", "-C", run["repo"], "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-    except (subprocess.SubprocessError, OSError):
-        url = ""
-    return parse_remote(url)
+    return parse_remote(origin_url(run))
 
 
 def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
@@ -65,14 +57,8 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
         raise SystemExit("error: run has no staged candidate")
     branch = run["branch"]
     base = run["base"]
-    manifest = manifest_text(home, task_id)
     if body is None:
-        body = (
-            f"{run['title']}\n\n"
-            f"Candidate: {candidate}\n"
-            f"Acceptance criteria: {'; '.join(run.get('acceptance_criteria') or [])}\n"
-            + (f"\n{manifest}" if manifest else "")
-        )
+        body = change_request_body(home, task_id, run, candidate)
     if title is None:
         title = run["title"]
 

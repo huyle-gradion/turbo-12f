@@ -19,8 +19,11 @@ Outcome rules (from the original Turbo's integration lessons):
 
 import json
 import os
+import re
+import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -38,6 +41,44 @@ def manifest_text(home, task_id):
         return ""
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def change_request_body(home, task_id, run, candidate):
+    manifest = manifest_text(home, task_id)
+    return (
+        f"{run['title']}\n\n"
+        f"Candidate: {candidate}\n"
+        f"Acceptance criteria: {'; '.join(run.get('acceptance_criteria') or [])}\n"
+        + (f"\n{manifest}" if manifest else "")
+    )
+
+
+def origin_url(run):
+    try:
+        return subprocess.run(
+            ["git", "-C", run["repo"], "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def parse_remote(url):
+    """(host, path) from an scp-style or URL git remote, or None.
+    The path has no leading slash and no .git suffix."""
+    url = url or ""
+    scp = re.match(r"^(?:[^@/]+@)?([^:/]+):(?!//)(.+)$", url)
+    if scp:
+        host, path = scp.group(1), scp.group(2)
+    else:
+        parts = urllib.parse.urlparse(url)
+        if parts.scheme not in ("http", "https", "ssh", "git") or not parts.hostname:
+            return None
+        host, path = parts.hostname, parts.path
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return (host.lower(), path) if path else None
 
 
 def request(method, url, token, payload=None, timeout=10):
@@ -105,6 +146,9 @@ def mutation_outcome(status, error, body=None):
 
 def _message(body, default):
     if isinstance(body, dict):
+        nested = body.get("error")
+        if isinstance(nested, dict) and nested.get("message"):
+            return str(nested["message"])[:300]
         for key in ("message", "errors"):
             value = body.get(key)
             if value:

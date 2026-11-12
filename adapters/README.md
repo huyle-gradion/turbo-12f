@@ -23,6 +23,48 @@ bin/t12 deliver --home <state-home> --task-id <id> \
   the outcome is `confirmed` and no duplicate is created. If its
   head is a different commit, `rejected`.
 
+## GitLab — create a merge request (never merge)
+
+```bash
+export GITLAB_TOKEN=...
+export GITLAB_URL=https://gitlab.example.com   # default https://gitlab.com
+python3 adapters/gitlab.py create-mr --home <state-home> --task-id <id> \
+  --out delivery.json [--project group/name] [--title T] [--body B]
+bin/t12 deliver --home <state-home> --task-id <id> \
+  --adapter gitlab --report delivery.json
+```
+
+- Uses the REST v4 API at `$GITLAB_URL/api/v4`. The token is sent
+  as a bearer token.
+- The project comes from `--project`, the task's `gitlab_project`
+  field, or the origin remote (only when its host is the
+  `GITLAB_URL` host). Nested groups work: `group/sub/name`.
+- The branch must already be pushed. The adapter finds an open MR
+  for the branch, creates one if none, then reads it back and
+  compares its `sha` to the reviewed head. An existing MR with the
+  reviewed head is `confirmed` with no duplicate; with another
+  head, `rejected`.
+
+## Bitbucket Cloud — create a pull request (never merge)
+
+```bash
+export BITBUCKET_TOKEN=...
+export BITBUCKET_URL=https://api.bitbucket.org/2.0   # the default
+python3 adapters/bitbucket.py create-pr --home <state-home> --task-id <id> \
+  --out delivery.json [--repo workspace/slug] [--title T] [--body B]
+bin/t12 deliver --home <state-home> --task-id <id> \
+  --adapter bitbucket --report delivery.json
+```
+
+- The token is sent as a bearer token.
+- The repo comes from `--repo`, the task's `bitbucket_repo` field,
+  or the origin remote (only on `bitbucket.org`).
+- Same flow as GitLab: find an open PR for the branch, create one
+  if none, read back `source.commit.hash`. Bitbucket may return an
+  abbreviated hash, so it is compared as a prefix of the full
+  reviewed SHA. A hash shorter than 12 characters cannot be
+  compared, so the outcome is `uncertain`, never `confirmed`.
+
 ## Asana — mark a task complete
 
 ```bash

@@ -1,6 +1,6 @@
 """Delivery (Phase 7): recording what happened outside the factory.
 
-The core never talks to GitHub or Asana and holds no credentials.
+The core never talks to a forge or Asana and holds no credentials.
 An adapter — a separate program the host runs — does the remote
 work and writes a JSON report. `t12 deliver` records that report
 as evidence. The core's job is to make the record honest:
@@ -42,7 +42,7 @@ import time
 
 from .errors import StateError
 
-ADAPTERS = ("github", "asana")
+ADAPTERS = ("github", "gitlab", "bitbucket", "asana")
 OUTCOMES = ("confirmed", "rejected", "denied", "uncertain")
 
 
