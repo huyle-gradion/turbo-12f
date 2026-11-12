@@ -387,6 +387,22 @@ def cmd_context(args):
                 "report_path": review["report"]["path"],
                 "findings": findings,
             }
+    gates = [{"name": g["name"], "status": g["status"]} for g in run["gates"]]
+    replay = None
+    if kind == "review":
+        # Pass what the factory observed on the current candidate, never
+        # the builder's own summary; results of a superseded candidate drop.
+        current = run["candidate"]["commit"] if run["candidate"] else None
+        for entry, g in zip(gates, run["gates"]):
+            ref = g.get("observation")
+            if current and ref and g.get("commit") == current:
+                entry.update(command=g["command"], commit=g["commit"],
+                             exit_code=ref["observation"]["exit_code"],
+                             sha256=ref["sha256"])
+        rp = run["replay"]
+        if current and rp and rp["commit"] == current:
+            replay = {"command": rp["command"], "exit_code": rp["exit_code"],
+                      "commit": rp["commit"], "sha256": rp["output"]["sha256"]}
     context = {
         "task_id": run["task_id"],
         "title": run["title"],
@@ -403,7 +419,8 @@ def cmd_context(args):
             "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
             "repairs_left": run["budgets"]["repair_cap"] - run["budgets"]["repairs_used"],
         },
-        "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
+        "gates": gates,
+        "replay": replay,
         "roles": run.get("roles", {}),
         "prior_review": prior_review,
         "covers": run["red"].get("covers") if run["red"] else None,
