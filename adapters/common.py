@@ -81,6 +81,16 @@ def parse_remote(url):
     return (host.lower(), path) if path else None
 
 
+def missing_branch_outcome(branch, project_status):
+    """The outcome of a 404 on the branch read. Forges answer 404 for a
+    project the token cannot see too, so the branch is only definitely
+    missing once the project itself reads back."""
+    if project_status == 200:
+        return "rejected", f"branch {branch!r} is not on the remote; push it first"
+    return "uncertain", (f"branch {branch!r} was not found and the project could not be "
+                         f"read (status {project_status}); check the token and project name")
+
+
 def request(method, url, token, payload=None, timeout=10):
     """One HTTP call. Returns (status, body, error):
     status is None on a transport failure (timeout, DNS, refused);

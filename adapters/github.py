@@ -29,7 +29,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    change_request_body, mutation_outcome, origin_url, read_outcome, read_run,
+    change_request_body, missing_branch_outcome, mutation_outcome, origin_url, read_outcome,
+    read_run,
     report, request, write_report,
 )
 
@@ -70,7 +71,8 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
     status, _body, error = request(
         "GET", f"{api_base}/repos/{repo}/branches/{branch}", token, timeout=timeout)
     if status == 404:
-        return fail("rejected", f"branch {branch!r} is not on the remote; push it first")
+        project_status, _, _ = request("GET", f"{api_base}/repos/{repo}", token, timeout=timeout)
+        return fail(*missing_branch_outcome(branch, project_status))
     if status != 200:
         outcome, detail = read_outcome(status, error)
         return fail(outcome, f"could not check remote branch: {detail}")
@@ -92,6 +94,10 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
             outcome, detail = read_outcome(status, error)
             return fail(outcome, f"could not read back PR #{number}: {detail}")
         head_sha = (pr.get("head") or {}).get("sha")
+        target = (pr.get("base") or {}).get("ref")
+        if head_sha == candidate and target != base:
+            return fail("rejected", f"PR #{number} has the reviewed head but targets "
+                        f"{target!r}, not {base!r}", ref=pr.get("html_url"))
         if head_sha == candidate:
             return fail("confirmed", f"PR #{number} already exists with the reviewed head",
                         ref=pr.get("html_url"))

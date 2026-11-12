@@ -39,7 +39,7 @@ from urllib.parse import quote, urlencode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    change_request_body, mutation_outcome, origin_url, parse_remote,
+    change_request_body, missing_branch_outcome, mutation_outcome, origin_url, parse_remote,
     read_outcome, read_run, report, request, write_report,
 )
 
@@ -88,13 +88,22 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
     def describe(actual):
         return str(actual)[:12] if actual else "missing"
 
-    status, _body, error = request(
+    status, branch_ref, error = request(
         "GET", f"{api}/refs/branches/{quote(branch, safe='/')}", token, timeout=timeout)
     if status == 404:
-        return done("rejected", f"branch {branch!r} is not on the remote; push it first")
+        repo_status, _, _ = request("GET", api, token, timeout=timeout)
+        return done(*missing_branch_outcome(branch, repo_status))
     if status != 200:
         outcome, detail = read_outcome(status, error)
         return done(outcome, f"could not check remote branch: {detail}")
+    # Pull requests report an abbreviated hash; the branch reports the
+    # full one, so the full compare happens here.
+    tip = ((branch_ref or {}).get("target") or {}).get("hash") if isinstance(branch_ref, dict) else None
+    if not isinstance(tip, str) or len(tip) != len(candidate):
+        return done("uncertain", f"could not read the full head of branch {branch!r}")
+    if tip.lower() != candidate.lower():
+        return done("rejected", f"branch {branch!r} is at {tip[:12]}, not the reviewed "
+                    f"head {candidate[:12]}; push the reviewed head")
 
     query = urlencode({"state": "OPEN", "q": f'source.branch.name="{branch}"'})
     status, listing, error = request(
@@ -113,6 +122,10 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
             return done(outcome, f"could not read back PR #{pr_id}: {detail}")
         actual = head_of(pr)
         verdict = compare_head(actual, candidate)
+        target = ((pr.get("destination") or {}).get("branch") or {}).get("name")
+        if verdict == "match" and target != run["base"]:
+            return done("rejected", f"PR #{pr_id} has the reviewed head but targets "
+                        f"{target!r}, not {run['base']!r}", ref=ref_of(pr))
         if verdict == "match":
             return done("confirmed", f"PR #{pr_id} already exists with the reviewed head",
                         ref=ref_of(pr))

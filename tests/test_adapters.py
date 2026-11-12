@@ -70,6 +70,10 @@ class FakeGitHub(BaseHTTPRequestHandler):
         path, query = self._route()
         self.REQUESTS.append(("GET", path))
         scenario = self.SCENARIO
+        if path == "/repos/o/r":
+            if scenario.get("project_missing"):
+                return self._json(404, {"message": "Not Found"})
+            return self._json(200, {"full_name": "o/r"})
         if path.startswith("/repos/o/r/branches/"):
             if scenario.get("branch_missing"):
                 return self._json(404, {"message": "Branch not found"})
@@ -93,7 +97,8 @@ class FakeGitHub(BaseHTTPRequestHandler):
                 head = scenario["existing_pr"]["head"]
             return self._json(200, {"number": number,
                                     "html_url": f"https://github.example/pr/{number}",
-                                    "head": {"sha": head}})
+                                    "head": {"sha": head},
+                                    "base": {"ref": scenario.get("target", "main")}})
         return self._json(404, {"message": "not found"})
 
     def do_POST(self):
@@ -139,6 +144,10 @@ class FakeGitLab(JsonHandler):
         path, query = parsed.path, parse_qs(parsed.query)
         self.REQUESTS.append(("GET", path))
         scenario = self.SCENARIO
+        if path == self.PROJECT:
+            if scenario.get("project_missing"):
+                return self._json(404, {"message": "404 Project Not Found"})
+            return self._json(200, {"path_with_namespace": "g/sub/n"})
         if path == f"{self.PROJECT}/repository/branches/factory%2Fdemo-1":
             if scenario.get("branch_missing"):
                 return self._json(404, {"message": "404 Branch Not Found"})
@@ -157,7 +166,8 @@ class FakeGitLab(JsonHandler):
             sha = scenario.get("readback_head", CANDIDATE)
             if scenario.get("existing"):
                 sha = scenario["existing"]["head"]
-            return self._json(200, {"iid": iid, "sha": sha, "web_url": f"{self.URL}/{iid}"})
+            return self._json(200, {"iid": iid, "sha": sha, "web_url": f"{self.URL}/{iid}",
+                                    "target_branch": scenario.get("target", "main")})
         return self._json(404, {"message": "404 Not Found"})
 
     def do_POST(self):
@@ -180,17 +190,23 @@ class FakeBitbucket(JsonHandler):
 
     def _pr(self, number, hash_):
         return {"id": number, "links": {"html": {"href": f"{self.URL}/{number}"}},
-                "source": {"commit": {"hash": hash_}}}
+                "source": {"commit": {"hash": hash_}},
+                "destination": {"branch": {"name": self.SCENARIO.get("target", "main")}}}
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path, query = unquote(parsed.path), parse_qs(parsed.query)
         self.REQUESTS.append(("GET", path))
         scenario = self.SCENARIO
+        if path == self.REPO:
+            if scenario.get("project_missing"):
+                return self._json(404, {"type": "error", "error": {"message": "Repository not found"}})
+            return self._json(200, {"full_name": "ws/slug"})
         if path == f"{self.REPO}/refs/branches/factory/demo-1":
             if scenario.get("branch_missing"):
                 return self._json(404, {"type": "error", "error": {"message": "No branch"}})
-            return self._json(200, {"name": "factory/demo-1", "target": {"hash": CANDIDATE}})
+            return self._json(200, {"name": "factory/demo-1",
+                                    "target": {"hash": scenario.get("branch_tip", CANDIDATE)}})
         if path == f"{self.REPO}/pullrequests":
             if scenario.get("list_status"):
                 return self._json(scenario["list_status"], {"type": "error", "error": {"message": "boom"}})
@@ -359,6 +375,17 @@ class GitHubAdapterCase(AdapterCase):
         self.assertEqual(data["outcome"], "rejected")
         self.assertIn("not on the remote", data["detail"])
 
+    def test_branch_404_on_an_unreadable_repo_is_uncertain(self):
+        home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
+        data, _ = self.github(home, {"branch_missing": True, "project_missing": True})
+        self.assertEqual(data["outcome"], "uncertain")
+
+    def test_existing_pr_on_another_base_rejected(self):
+        home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
+        data, _ = self.github(home, {"existing_pr": {"number": 3, "head": CANDIDATE},
+                                     "target": "release"})
+        self.assertEqual(data["outcome"], "rejected")
+
     def test_create_forbidden_denied(self):
         home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
         data, _ = self.github(home, {"create_status": 403})
@@ -502,6 +529,18 @@ class ForgeContract:
         self.assertIn("not on the remote", data["detail"])
         self.assertEqual(self.posts(), [])
 
+    def test_branch_404_on_an_unreadable_project_is_uncertain(self):
+        data, _ = self.forge(self.home(), {"branch_missing": True, "project_missing": True})
+        self.assertEqual(data["outcome"], "uncertain")
+        self.assertEqual(self.posts(), [])
+
+    def test_existing_same_head_on_another_target_rejected(self):
+        data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": self.same_head()},
+                                           "target": "release"})
+        self.assertEqual(data["outcome"], "rejected")
+        self.assertIn("release", data["detail"])
+        self.assertEqual(self.posts(), [])
+
     def test_create_forbidden_denied(self):
         data, _ = self.forge(self.home(), {"create_status": 403})
         self.assertEqual(data["outcome"], "denied")
@@ -618,6 +657,13 @@ class BitbucketAdapterCase(ForgeContract, AdapterCase):
     def test_short_hash_prefix_of_other_commit_rejected(self):
         data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": OTHER_HEAD[:12]}})
         self.assertEqual(data["outcome"], "rejected")
+
+    def test_branch_tip_sharing_the_short_prefix_rejected(self):
+        tip = CANDIDATE[:12] + "f" * 28
+        data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": CANDIDATE[:12]},
+                                           "branch_tip": tip})
+        self.assertEqual(data["outcome"], "rejected")
+        self.assertEqual(self.posts(), [])
 
     def test_hash_shorter_than_twelve_is_uncertain_not_confirmed(self):
         data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": CANDIDATE[:8]}})
@@ -773,7 +819,7 @@ class EndToEndCase(unittest.TestCase):
 
     def test_factory_run_delivers_a_bitbucket_pr(self):
         candidate = self.certified_candidate({"bitbucket_repo": "ws/slug", "branch": "factory/demo-1"})
-        self.serve(FakeBitbucket, {"readback_head": candidate[:12]})
+        self.serve(FakeBitbucket, {"readback_head": candidate[:12], "branch_tip": candidate})
         self.deliver_and_check("bitbucket", "bitbucket.py", "create-pr", "BITBUCKET_TOKEN",
                                f"http://127.0.0.1:{self.port}/2.0", f"{FakeBitbucket.URL}/7")
 

@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    change_request_body, mutation_outcome, origin_url, parse_remote,
+    change_request_body, missing_branch_outcome, mutation_outcome, origin_url, parse_remote,
     read_outcome, read_run, report, request, write_report,
 )
 
@@ -69,7 +69,8 @@ def create_mr(home, task_id, project, title, body, base_url, timeout, token):
     status, _body, error = request(
         "GET", f"{api}/repository/branches/{encoded_branch}", token, timeout=timeout)
     if status == 404:
-        return done("rejected", f"branch {branch!r} is not on the remote; push it first")
+        project_status, _, _ = request("GET", api, token, timeout=timeout)
+        return done(*missing_branch_outcome(branch, project_status))
     if status != 200:
         outcome, detail = read_outcome(status, error)
         return done(outcome, f"could not check remote branch: {detail}")
@@ -90,6 +91,10 @@ def create_mr(home, task_id, project, title, body, base_url, timeout, token):
             outcome, detail = read_outcome(status, error)
             return done(outcome, f"could not read back MR !{iid}: {detail}")
         head_sha = mr.get("sha")
+        if head_sha == candidate and mr.get("target_branch") != run["base"]:
+            return done("rejected", f"MR !{iid} has the reviewed head but targets "
+                        f"{mr.get('target_branch')!r}, not {run['base']!r}",
+                        ref=mr.get("web_url"))
         if head_sha == candidate:
             return done("confirmed", f"MR !{iid} already exists with the reviewed head",
                         ref=mr.get("web_url"))

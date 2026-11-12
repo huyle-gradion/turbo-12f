@@ -125,3 +125,15 @@ first attempt may have landed. The block is per adapter.
 An adapter exits 0 when it wrote a report, whatever the outcome.
 Non-zero means the adapter itself could not run (missing token,
 missing run record, bad arguments) and no report exists.
+
+Forge-specific readings of those rules:
+
+- A 404 on the branch is `rejected` only when the project or repo
+  itself reads back. Forges also answer 404 for a project the token
+  cannot see, so otherwise it is `uncertain`.
+- An existing change request is `confirmed` only when it has the
+  reviewed head and targets the run's base branch. The same head on
+  another target is `rejected`.
+- Bitbucket pull requests report an abbreviated hash, so the Bitbucket
+  adapter also requires the branch's full head to equal the reviewed
+  commit.
