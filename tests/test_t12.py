@@ -223,6 +223,25 @@ class CliCase(unittest.TestCase):
         self.assertIn("did not fail", result.stderr)
         self.assertEqual(self.phase(), "ready")
 
+    def test_skipped_red_test_is_refused_with_a_hint_about_the_cage(self):
+        skipping = (
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    @unittest.skip('binding loopback TCP is denied here')\n"
+            "    def test_x(self):\n"
+            "        self.fail('FAILED')\n"
+        )
+        self.write_worktree("tests/test_skip.py", skipping)
+        result = self.t12(
+            "red", "--home", self.home, "--task-id", "demo-1",
+            "--test-path", "tests/test_skip.py",
+            "--command", "python3 -m unittest tests.test_skip -v",
+            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
+        )
+        self.assertIn("skipped", result.stderr)
+        self.assertIn("socket", result.stderr)
+        self.assertEqual(self.phase(), "ready")
+
     def test_pause_resume_and_resume_drift(self):
         self.do_red()
         self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")

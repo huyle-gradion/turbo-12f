@@ -542,10 +542,18 @@ def cmd_red(args):
             "step": "red", "exit_code": obs["exit_code"],
             "output": (obs["stdout"] + obs["stderr"])[-4000:],
         })
+        hint = ""
+        if not obs["timed_out"] and re.search(r"\bskipped\b", obs["stdout"] + obs["stderr"], re.I):
+            hint = (
+                "; some tests were skipped, and a skipped test counts as passing. "
+                "Verification runs in a cage that denies all network, loopback included, "
+                "so tests that open a socket or start a local server skip. "
+                "Do not open sockets: inject a fake into the code under test"
+            )
         raise StateError(
             "red test did not fail as required "
             f"(exit={obs['exit_code']}, timed_out={obs['timed_out']}); "
-            "a passing test cannot be the red test"
+            f"a passing test cannot be the red test{hint}"
         )
     combined = obs["stdout"] + obs["stderr"]
     if args.marker not in combined:
