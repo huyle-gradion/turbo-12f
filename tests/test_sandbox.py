@@ -60,7 +60,8 @@ class EnvTest(unittest.TestCase):
     def test_forbidden_keys(self):
         for key in ("GITHUB_TOKEN", "MY_TOKEN", "AWS_SECRET_ACCESS_KEY",
                     "DATABASE_URL", "PYTHONPATH", "OPENAI_API_KEY",
-                    "PRODUCTION_DATABASE_URL", "SSH_AUTH_SOCK", "GIT_DIR"):
+                    "PRODUCTION_DATABASE_URL", "SSH_AUTH_SOCK", "GIT_DIR",
+                    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "DOCKER_HOST"):
             self.assertTrue(sandbox.is_forbidden_env_key(key), key)
         for key in ("PATH", "HOME", "USER", "LANG", "MY_SETTING"):
             self.assertFalse(sandbox.is_forbidden_env_key(key), key)
@@ -151,6 +152,30 @@ class LandlockTest(unittest.TestCase):
         finally:
             server.server_close()
 
+    @unittest.skipUnless(sandbox.landlock_abi() >= 9, "Landlock cannot scope unix sockets")
+    def test_unix_sockets_outside_denied_but_allowed_without_sandbox(self):
+        path = os.path.join(self.tmp.name, "s")
+        abstract = "\0t12-test-" + os.path.basename(self.tmp.name)
+        servers = []
+        try:
+            for address in (path, abstract):
+                server = socket.socket(socket.AF_UNIX)
+                servers.append(server)
+                server.bind(address)
+                server.listen(1)
+                code = ("import socket; socket.socket(socket.AF_UNIX).connect(%r);"
+                        " print('CONNECTED')" % address)
+                denied = runner.run(["python3", "-c", code], cwd=self.worktree,
+                                    timeout_s=10, sandbox=self.ctx)
+                self.assertNotEqual(denied["exit_code"], 0, address)
+                self.assertIn("PermissionError", denied["stderr"])
+                allowed = runner.run(["python3", "-c", code], cwd=self.worktree,
+                                     timeout_s=10)
+                self.assertIn("CONNECTED", allowed["stdout"], address)
+        finally:
+            for server in servers:
+                server.close()
+
 
 class ProbeTest(unittest.TestCase):
     def test_probes_pass_under_landlock(self):
@@ -173,6 +198,16 @@ class ProbeTest(unittest.TestCase):
                 summary = json.load(fh)
             self.assertEqual(summary["adapter"], "landlock")
             self.assertNotIn("T12_PROBE_SECRET", os.environ)
+
+    def test_probe_fails_when_unix_sockets_are_reachable(self):
+        with tempfile.TemporaryDirectory() as home:
+            worktree = os.path.join(home, "wt")
+            os.makedirs(worktree)
+            run = {"task_id": "probe-2", "worktree": worktree, "sandbox_adapter": "none"}
+            results = {r["name"]: r for r in sandbox.run_probes(home, run, runner.run)}
+            external = results["external_effect_restriction"]
+            self.assertFalse(external["passed"])
+            self.assertTrue(external["detail"].startswith("GRANTED:unix:"), external)
 
     def test_probes_passed_requires_all(self):
         self.assertFalse(sandbox.probes_passed([]))
