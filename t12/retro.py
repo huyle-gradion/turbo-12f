@@ -9,7 +9,7 @@ import json
 import os
 import statistics
 
-from . import model, store
+from . import store
 
 MIN_COUNT = 3
 
@@ -25,13 +25,13 @@ def _events(path):
     return events
 
 
-def _review_findings(home, event):
+def _review_findings(event):
     """Finding classes from a structured review a worker submitted
     through `act`, or None when its stored output no longer matches
     the recorded hash. It counts only if the next event records the
     review; `act` logs the output before the review step can refuse."""
     ref = event["detail"]["output"]
-    path = os.path.join(model.evidence_dir(home, event["task_id"]), ref["name"])
+    path = ref["path"]
     try:
         if store.sha256_file(path) != ref["sha256"]:
             return None
@@ -78,7 +78,7 @@ def collect(home):
             elif kind == "human-contact":
                 escalations[detail.get("question", "").strip()].add(run_name)
             elif kind == "worker-output" and detail.get("tool") == "review":
-                submitted = _review_findings(home, event)
+                submitted = _review_findings(event)
                 if submitted is None:
                     unreadable += 1
         findings.update(classes_seen)

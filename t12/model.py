@@ -111,7 +111,17 @@ def verify_checkout_dir(home, task_id):
     return os.path.join(home, "verify", task_id)
 
 
+def run_evidence_dir(home, run):
+    """A run that supersedes another writes evidence to its own
+    directory, so the archived run's refs keep their bytes."""
+    return os.path.join(home, "evidence", run.get("evidence_key") or run["task_id"])
+
+
 def evidence_dir(home, task_id):
+    """The current run's evidence directory."""
+    path = run_path(home, task_id)
+    if os.path.exists(path):
+        return run_evidence_dir(home, store.load_json(path))
     return os.path.join(home, "evidence", task_id)
 
 
@@ -379,6 +389,7 @@ def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None
         "phase": "unadmitted",
         "prior_phase": None,
         "supersedes": supersedes,
+        "evidence_key": f"{task['id']}.run-{int(now * 1000)}" if supersedes else task["id"],
         "created_at": now,
         "config_digest": store.sha256_bytes(store.canonical_json(task)),
         "budgets": {
