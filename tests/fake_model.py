@@ -58,7 +58,8 @@ if role == "test-writer":
         with open("tests/test_greet.py", "w", encoding="utf-8") as fh:
             fh.write(TEST)
         say("red_test_ready", test_path="tests/test_greet.py",
-            command=["python3", "-m", "unittest", "tests.test_greet", "-q"], marker="FAILED")
+            command=["python3", "-m", "unittest", "tests.test_greet", "-q"], marker="FAILED",
+            covers={"0": ["test_named"]})
 elif role == "builder":
     if mode == "builder-fails":
         sys.exit("model unavailable")

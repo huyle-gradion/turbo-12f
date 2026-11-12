@@ -37,6 +37,9 @@ if __name__ == "__main__":
 """
 
 
+COVERS = json.dumps({"0": ["test_named"], "1": ["test_default"]})
+
+
 def task_dict(task_id="demo-1", gates=None):
     return {
         "id": task_id,
@@ -120,7 +123,7 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_greet.py",
             "--command", "python3 -m unittest tests.test_greet -q",
-            "--marker", "FAILED", "--session", "sess-test-writer",
+            "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS,
         )
         self.assertEqual(self.phase(), "red")
 
@@ -181,7 +184,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home2, "--task-id", "two-gates",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
@@ -213,7 +216,7 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_greet.py",
             "--command", "python3 -m unittest tests.test_greet -q",
-            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
+            "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS, expect=1,
         )
         self.assertIn("did not fail", result.stderr)
         self.assertEqual(self.phase(), "ready")
@@ -331,7 +334,7 @@ class CliCase(unittest.TestCase):
         result = self.t12("red", "--home", home2, "--task-id", "demo-rp",
                           "--command", "python3 -m unittest tests.test_greet -q",
                           "--marker", "nope", "--test-path", "tests/test_greet.py",
-                          "--session", "sess-test-writer", expect=1)
+                          "--session", "sess-test-writer", "--covers", COVERS, expect=1)
         self.assertIn("safety probes have not passed", result.stderr)
 
     def test_verify_passes_on_happy_path(self):
@@ -401,7 +404,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home2, "--task-id", "demo-fg",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
@@ -450,7 +453,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", task_id,
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
@@ -615,7 +618,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-sec",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")
@@ -759,7 +762,7 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_greet.py",
             "--command", "python3 -m unittest tests.test_greet -q",
-            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
+            "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS, expect=1,
         )
         self.assertIn("did not fail", result.stderr)
 
@@ -817,7 +820,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", "demo-xdg",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer", extra_env=env)
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS, extra_env=env)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "commit", "-qam", "feat: implement greet")
@@ -841,7 +844,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", "demo-deps",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write("import os, sys\n"
                      "sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'vendor'))\n"
@@ -874,7 +877,7 @@ class CliCase(unittest.TestCase):
         self.act("test-writer", "sess-tw", {"tool": "red_test_ready", "args": {
             "test_path": "tests/test_greet.py",
             "command": ["python3", "-m", "unittest", "tests.test_greet", "-q"],
-            "marker": "FAILED"}})
+            "marker": "FAILED", "covers": json.loads(COVERS)}})
         self.assertEqual(self.phase(), "red")
         self.write_worktree("app.py", APP_V2)
         self.commit_worktree("feat: implement greet")
@@ -936,8 +939,8 @@ class CliCase(unittest.TestCase):
         proc = subprocess.Popen(
             [BIN, "red", "--home", self.home, "--task-id", "demo-1",
              "--test-path", "tests/test_greet.py",
-             "--command", "python3 -c \"import time; time.sleep(2); print('FAILED'); raise SystemExit(1)\"",
-             "--marker", "FAILED", "--session", "sess-test-writer"],
+             "--command", "python3 -c \"import time; time.sleep(2); print('FAILED test_named test_default'); raise SystemExit(1)\"",
+             "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
         time.sleep(1)
@@ -958,7 +961,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-1",
                  "--test-path", "tests/unit/test_greet.py",
                  "--command", "python3 -m unittest discover -s tests/unit -t tests/unit -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         self.assertEqual(self.phase(), "red")
 
     def test_verify_deps_may_not_overlap(self):
@@ -1006,7 +1009,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-1",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS, expect=1)
         self.assertEqual(self.run_record()["budgets"]["ops_used"], 1)
 
     def test_answer_without_an_open_question_is_refused(self):
@@ -1040,7 +1043,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", task_id,
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(app)
         self._git(wt, "commit", "-qam", "feat: implement greet")
@@ -1059,7 +1062,7 @@ class CliCase(unittest.TestCase):
         result = self.t12("red", "--home", home, "--task-id", "demo-red-narrow",
                           "--test-path", "tests/test_greet.py",
                           "--command", "python3 -m unittest tests.test_greet -q",
-                          "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+                          "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS, expect=1)
         self.assertIn("outside the task's touches: tests/test_greet.py", result.stderr)
 
     def test_stage_refuses_changes_outside_touches(self):
@@ -1071,7 +1074,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", "demo-narrow",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "commit", "-qam", "feat: implement greet")
@@ -1169,7 +1172,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", task_id,
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-tw")
+                 "--marker", "FAILED", "--session", "sess-tw", "--covers", COVERS)
         for app, expect in ((APP_WRONG, 1), (APP_V2, 0)):
             with open(os.path.join(wt, "app.py"), "w") as fh:
                 fh.write(app)
@@ -1243,7 +1246,7 @@ class CliCase(unittest.TestCase):
         self.t12("red", "--home", home, "--task-id", task_id,
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         for rel, content in [("app.py", APP_V2), *extra]:
             os.makedirs(os.path.dirname(os.path.join(wt, rel)) or wt, exist_ok=True)
             with open(os.path.join(wt, rel), "w") as fh:
@@ -1635,7 +1638,7 @@ class CliCase(unittest.TestCase):
             self.t12("red", "--home", self.home, "--task-id", task_id,
                      "--test-path", "tests/test_greet.py",
                      "--command", "python3 -m unittest tests.test_greet -q",
-                     "--marker", "FAILED", "--session", "sess-test-writer")
+                     "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
             with open(os.path.join(wt, "app.py"), "w") as fh:
                 fh.write(APP_V2)
             self._git(wt, "commit", "-qam", "feat: implement greet")
@@ -1713,7 +1716,7 @@ class DockerFlow(unittest.TestCase):
         self.dt12("red", "--home", self.home, "--task-id", task_id,
                   "--test-path", "tests/test_greet.py",
                   "--command", "python3 -m unittest tests.test_greet -q",
-                  "--marker", "FAILED", "--session", "sess-test-writer")
+                  "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(wt, "add", ".")

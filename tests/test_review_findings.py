@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import unittest
 
-from tests.test_t12 import APP_V1, APP_V2, BIN, TEST_FILE, task_dict
+from tests.test_t12 import APP_V1, APP_V2, BIN, COVERS, TEST_FILE, task_dict
 
 FINDING = "greet() drops the trailing newline contract"
 
@@ -38,7 +38,7 @@ class ChangesRequestedLoop(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-1",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         self.write(wt, "app.py", APP_V2)
         self.git(wt, "add", ".")
         self.git(wt, "commit", "-m", "feat: implement greet")

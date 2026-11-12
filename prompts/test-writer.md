@@ -10,8 +10,7 @@ tests.
 Write exactly one failing test file for the acceptance criteria in the
 context below. The test must:
 
-- cover one acceptance criterion (or one small group of closely
-  related criteria) — nothing more;
+- cover every acceptance criterion — nothing more;
 - FAIL on the current code, with the failure marker named in the
   context;
 - use only the project's existing test framework and imports;
@@ -25,14 +24,18 @@ When you are done, write a JSON result to stdout:
 {"tool": "red_test_ready", "args": {
   "test_path": "tests/test_x.py",
   "command": ["python3", "-m", "pytest", "tests/test_x.py", "-q"],
-  "marker": "FAILED"
+  "marker": "FAILED",
+  "covers": {"0": ["test_named"], "1": ["test_default", "test_named"]}
 }}
 ```
 
 `command` is the exact argv that runs your test (a list, never a
 shell string). `marker` is text that appears in its output when the
-test fails. The factory commits the test, runs `command` on that
-commit, and refuses unless it fails with `marker` in the output.
+test fails. `covers` maps every acceptance criterion, by its index in
+the context, to the test or tests that check it; one test may cover
+several criteria. The factory commits the test, runs `command` on that
+commit, and refuses unless it fails with `marker` in the output, every
+criterion is mapped, and every mapped test is in the file and fails.
 
 If you cannot write a failing test — the criterion is untestable, or
 it already passes — do NOT fake a failure. Return instead:
