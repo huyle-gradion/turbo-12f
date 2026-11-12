@@ -186,6 +186,44 @@ transport error on the list, on any page, writes nothing, prints
 `error: ... nothing written` to stderr and exits 1. Exit 2 means it
 could not run (missing token, no label, unreadable profile).
 
+## Runner — drive runs with no one in the inner loop
+
+```bash
+python3 adapters/runner.py --home <state-home> --queue <queue dir> --max 2 \
+  --model-cmd "claude -p" [--notify-cmd "notify-send t12"]
+```
+
+Each pass admits tasks through `bin/t12-queue`, then takes one step
+per run from `t12 board --json`. A step that leaves a run where it
+was (a refused `act`, a failed replay, a failed model call) is not
+retried in the same invocation. The runner exits when a pass moves no
+run, so run it again from cron or when a task file lands in the queue.
+
+- `replay`, `green` and `qa: gate N` run as `t12` commands. No model
+  is called.
+- Every other role step is a worker call. `t12 context` builds the
+  prompt, the runner pipes it to `--model-cmd` in the run's worktree
+  with `T12_TASK_ID`, `T12_ROLE`, `T12_SESSION` and `T12_WORKTREE`
+  set, and passes stdout to `t12 act`. The command must print only
+  the JSON tool call, and must be allowed to edit the worktree and run
+  `git commit` without a prompt. Each call gets a session id never
+  used before.
+- When `act` rejects the output, the runner sends the error back to
+  the same session once, if the budget still has an operation left.
+  A failed model call records nothing, and the next runner tries
+  again.
+- `human: ...`, `stopped: ...` and a spent budget are never acted on.
+  After the last pass the runner prints `waiting <id>: <reason>` for
+  each and for each run a step did not move. It runs `--notify-cmd`
+  with that line as its last argument. An answer goes in through
+  `t12 resume --answer`. A merge is a human's.
+- The runner keeps no state. Kill it at any point and start it again:
+  it carries on from the run records. A second runner on the same
+  state home is refused.
+
+The worker runs outside `bin/t12-cage`, as a hand-driven worker does
+today, so the builder commits its own change.
+
 ## Report schema
 
 ```json

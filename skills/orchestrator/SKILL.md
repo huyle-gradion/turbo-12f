@@ -4,6 +4,10 @@ You dispatch work; you do not implement it. One lane at a time per
 run, through the deterministic CLI (`bin/t12`). The CLI owns state,
 control flow, evidence, and budgets. You own routing.
 
+To drive runs with no one in the loop, run `adapters/runner.py`
+(see `adapters/README.md`). It follows these rules in plain code.
+This skill is for driving a run by hand.
+
 Many runs may proceed at once, one orchestrator per run. Admit them
 through `bin/t12-queue --max N`, never by hand: it starts a task only
 when its `depends_on` tasks are merged and its `touches` overlap no
