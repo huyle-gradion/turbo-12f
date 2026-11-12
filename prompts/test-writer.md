@@ -20,7 +20,12 @@ context below. The test must:
   skips, a skipped test counts as passing, and the factory refuses it as
   a red test. Inject a fake function or object into the code under test
   instead of a fake HTTP server, and do not copy an existing
-  "binding loopback TCP is denied" skip into your test.
+  "binding loopback TCP is denied" skip into your test;
+- never run `git push`, `git fetch` or `git clone` against a remote, even
+  a local bare repository. The gate runs with `GIT_ALLOW_PROTOCOL=none`,
+  so those commands fail with exit 128 and every test that depends on
+  them errors in `setUp`. Local `git init`, `add` and `commit` work.
+  Stub the code that pushes, or inject a fake runner for it.
 
 ## Output (structured — Factor 4)
 
