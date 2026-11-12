@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 
-from t12 import model, store
+from t12 import model, profile, store
 from t12.errors import BudgetError, StateError
 
 # The spec: allowed targets per phase. A transition to the phase
@@ -183,18 +183,88 @@ class ArchiveTest(unittest.TestCase):
 
 
 
-class PolicyTest(unittest.TestCase):
-    def test_adding_or_editing_a_policy_needs_a_security_review(self):
-        for base_policy in (None, '{"security_review_paths": ["src/auth"]}'):
-            roots = model.security_paths(base_policy)
-            self.assertTrue(model.under(".t12/policy.json", roots), base_policy)
-            self.assertFalse(model.under("src/other.py", roots), base_policy)
+class ProfileTest(unittest.TestCase):
+    GATE = {"name": "unit", "command": ["python3", "-m", "unittest"]}
+
+    def profile(self, **fields):
+        return profile.parse(json.dumps(dict({"version": 1}, **fields)))
+
+    def test_editing_or_adding_a_profile_needs_a_security_review(self):
+        for base in (profile.parse(None), self.profile(security_review_paths=["src/auth"])):
+            roots = profile.security_roots(base)
+            self.assertTrue(model.under(".t12/project.json", roots))
+            self.assertFalse(model.under("src/other.py", roots))
         self.assertTrue(model.under("src/auth/login.py", roots))
 
-    def test_a_malformed_policy_on_the_base_is_refused(self):
-        for text in ("[]", "not json", '{"security_review_paths": ["../x"]}'):
-            with self.assertRaises(StateError):
-                model.security_paths(text)
+    def test_a_malformed_profile_on_the_base_is_refused(self):
+        for text in ("[]", "not json", '{"version": 2}', '{"version": 1, "gatez": []}',
+                     '{"version": 1, "protected_paths": ["../x"]}',
+                     '{"version": 1, "op_limit": true}'):
+            with self.assertRaises(StateError, msg=text):
+                profile.parse(text)
+
+    def test_a_task_without_settings_takes_the_profile(self):
+        merged = profile.apply(self.profile(gates=[self.GATE], op_limit=9), {"id": "t"})
+        self.assertEqual(merged["gates"], [self.GATE])
+        self.assertEqual(merged["op_limit"], 9)
+
+    def test_a_task_can_tighten_but_never_loosen_the_profile(self):
+        base = self.profile(gates=[self.GATE], required_reviews=["reviewer"],
+                            sandbox_adapter="docker", require_probes=True)
+        extra = {"name": "lint", "command": ["ruff", "check"]}
+        merged = profile.apply(base, {"gates": [extra], "required_reviews": ["security"],
+                                      "require_probes": False})
+        self.assertEqual(merged["gates"], [self.GATE, extra])
+        self.assertEqual(merged["required_reviews"], ["reviewer", "security"])
+        self.assertTrue(merged["require_probes"])
+        for loosen in ({"sandbox_adapter": "none"}, {"gates": [self.GATE]},
+                       {"protected_paths": []}, {"security_review_paths": []}):
+            with self.assertRaises(StateError, msg=loosen):
+                profile.apply(base, loosen)
+
+    def test_a_task_may_only_narrow_the_profiles_verify_deps(self):
+        base = self.profile(verify_deps=[".venv", "node_modules"])
+        self.assertEqual(profile.apply(base, {"verify_deps": [".venv"]})["verify_deps"], [".venv"])
+        with self.assertRaises(StateError):
+            profile.apply(base, {"verify_deps": ["vendor"]})
+
+    def test_verify_deps_may_not_overlap_a_protected_path(self):
+        base = self.profile(protected_paths=["guards"])
+        for dep in ("guards/__pycache__", "guards"):
+            with self.assertRaises(StateError, msg=dep):
+                profile.apply(base, {"verify_deps": [dep]})
+
+    def test_a_mistyped_task_value_is_a_clear_error(self):
+        base = self.profile(gates=[self.GATE], required_reviews=["reviewer"])
+        for bad in ({"gates": None}, {"required_reviews": None}, {"op_limit": "9"}):
+            with self.assertRaises(StateError, msg=bad):
+                profile.apply(base, bad)
+
+    def test_a_profile_that_lists_no_deps_allows_none(self):
+        with self.assertRaises(StateError):
+            profile.apply(self.profile(), {"verify_deps": [".venv"]})
+        self.assertEqual(profile.apply(profile.parse(None), {"verify_deps": [".venv"]})
+                         ["verify_deps"], [".venv"])
+
+    def test_a_dep_beside_a_protected_file_is_refused(self):
+        base = self.profile(protected_paths=["guards/test_guard.py"],
+                            verify_deps=["guards/__pycache__", ".venv"])
+        with self.assertRaises(StateError):
+            profile.apply(base, {"verify_deps": ["guards/__pycache__"]})
+        root_file = self.profile(protected_paths=["AGENTS.md"], verify_deps=[".venv"])
+        self.assertEqual(profile.apply(root_file, {})["verify_deps"], [".venv"])
+
+    def test_a_mistyped_list_entry_is_a_clear_error(self):
+        base = self.profile(gates=[self.GATE], verify_deps=[".venv"])
+        for bad in ({"verify_deps": [1]}, {"gates": [1]}, {"gates": [{"name": ["x"]}]},
+                    {"required_reviews": [None]}):
+            with self.assertRaises(StateError, msg=bad):
+                profile.apply(base, bad)
+
+    def test_the_task_sets_its_own_budget(self):
+        merged = profile.apply(self.profile(op_limit=9), {"op_limit": 40})
+        self.assertEqual(merged["op_limit"], 40)
+
 
 if __name__ == "__main__":
     unittest.main()

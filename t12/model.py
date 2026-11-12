@@ -260,25 +260,6 @@ def outside_touches(run, paths):
     return [p for p in paths if not under(p, touches)]
 
 
-POLICY_PATH = ".t12/policy.json"
-
-
-def security_paths(policy_text):
-    """Paths whose change requires a security review, from the policy
-    file as it stands on the base commit. The policy folder is always
-    one of them, so a candidate can neither drop an entry nor add the
-    first policy without a security review."""
-    if policy_text is None:
-        return [os.path.dirname(POLICY_PATH)]
-    try:
-        paths = json.loads(policy_text).get("security_review_paths", [])
-    except (ValueError, AttributeError) as exc:
-        raise StateError(f"{POLICY_PATH} on the base commit is not a JSON object") from exc
-    if not isinstance(paths, list) or not all(_is_worktree_path(p) for p in paths):
-        raise StateError(f"{POLICY_PATH}: security_review_paths must be relative paths: {paths!r}")
-    return [os.path.normpath(p) for p in paths] + [os.path.dirname(POLICY_PATH)]
-
-
 def _is_worktree_path(path):
     if not isinstance(path, str) or not path or os.path.isabs(path):
         return False

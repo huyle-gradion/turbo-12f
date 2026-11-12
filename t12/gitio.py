@@ -72,6 +72,15 @@ def is_ancestor(repo, ancestor, descendant):
     return obs["exit_code"] == 0 and not obs["timed_out"]
 
 
+def git_ok_bool(repo, *args):
+    obs = git(repo, *args)
+    return obs["exit_code"] == 0 and not obs["timed_out"]
+
+
+def merge_base(repo, a, b):
+    return git_ok(repo, "merge-base", a, b)
+
+
 def changed_paths(repo, a, b):
     """Every path that differs between two commits. A rename counts as
     both its old and its new path."""

@@ -152,6 +152,59 @@ state home if `t12 calibrate --apply` has written one, else the
 built-ins (3600s / 100 ops / 3 repairs). The run records which
 source applied (`budget_source`).
 
+## Project profile
+
+A project keeps what its tasks share in `.t12/project.json`, so a task
+file only says what is unique to it:
+
+```json
+{
+  "version": 1,
+  "name": "my-product",
+  "gates": [{"name": "unit", "command": ["python3", "-m", "pytest", "-q"]}],
+  "required_reviews": ["reviewer"],
+  "sandbox_adapter": "docker",
+  "sandbox_image": "my-product-verify:1",
+  "verify_deps": [".venv"],
+  "protected_paths": ["guards", "e2e"],
+  "security_review_paths": ["src/auth"]
+}
+```
+
+`prepare` reads the profile from the trunk branch the state home names
+(`t12 init --trunk`, default `main`; a tag of the same name does not
+count, and a state home cannot switch trunks), never from the task's
+`base` or
+the worktree, and stores the merged task in the run. A task cannot
+pick an older commit or another run's branch to get weaker rules, and
+a candidate that edits the profile changes nothing for its own run.
+Unknown keys are refused. A leftover `.t12/policy.json` on trunk stops
+`prepare` until its `security_review_paths` move into the profile.
+
+A task may tighten the profile but never loosen it, because task files
+may come from an issue tracker:
+
+| Key | When both the profile and the task set it |
+|---|---|
+| `gates` | The profile's gates run first, then the task's |
+| `required_reviews` | Both lists apply |
+| `require_probes` | On if either turns it on |
+| `sandbox_adapter`, `sandbox_image` | Refused unless equal |
+| `verify_deps` | The task may only narrow the profile's list; a profile without one allows none |
+| budgets | The task wins |
+| `protected_paths`, `security_review_paths` | Profile only; a task may not set them |
+
+`stage` refuses a candidate that changes a protected path, measured
+from both the task's base and the point where the candidate leaves
+trunk, so a base carrying another run's unreviewed edit cannot hide
+it. A move out of a protected path counts as a change to it. A
+`verify_deps` entry may not overlap a protected path or sit in the
+folder of a protected file, and a dep reached through a symlink the
+candidate commits is refused at the gate. A base with no history in
+common with trunk is refused at `prepare`. Deps still come
+from the builder's worktree, so a builder can put code in `.venv` or
+`node_modules` that a gate runs; the profile does not close that.
+
 ## Running several tasks at once
 
 Separate runs share one state home and proceed in parallel. Each
@@ -184,8 +237,9 @@ that run as merged: tasks that depend on it, or overlap it, wait. Use
 merge commits for factory branches.
 
 Runs prepared before `touches` existed carry no `base_commit`, so
-`stage` skips the `touches` and policy checks for them. Finish or
-supersede them before relying on either.
+`stage` skips the `touches` and profile checks for them. Finish or
+supersede them before relying on either. Runs prepared after `touches`
+but before project profiles are refused at `stage`; supersede them.
 
 ## Improving the factory
 
@@ -208,12 +262,12 @@ a task aimed at turbo-12f. Two rules keep that safe:
   installed copy of `main` (or the `turbo-12f` image through
   `bin/t12-container`), never from a worktree. `t12` refuses to run
   when its own code sits inside the state home it is given.
-- **Policy changes need a security review.** A product repo may list
-  paths in `.t12/policy.json` as `"security_review_paths"`. `stage`
-  reads that file from the run's base commit, not the candidate, and
+- **Profile changes need a security review.** A product repo may list
+  paths in `.t12/project.json` as `"security_review_paths"`. `stage`
+  reads the profile from the run's base commit, not the candidate, and
   adds `security` to `required_reviews` when the candidate changes a
-  listed path or the policy file itself. turbo-12f lists its state
-  machine, sandbox, evidence and storage code, and its prompts.
+  listed path or anything under `.t12/`. turbo-12f lists its state
+  machine, profile, sandbox, evidence and storage code, and its prompts.
 
 The factory still stops at `local-verified`. A human merges.
 
