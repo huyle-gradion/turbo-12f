@@ -443,6 +443,20 @@ def _named(name, text):
     return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) is not None
 
 
+def _short_test_name(name):
+    return re.split(r"::|\.", name)[-1]
+
+
+_FAILURE_WORD = re.compile(r"(?<!\w)(?:FAIL|FAILED|ERROR|not ok)(?!\w)")
+
+
+def _reported_failing(name, output):
+    """True when a line of the runner's output names the test and marks it failed."""
+    short = _short_test_name(name)
+    return any(_named(short, line) and _FAILURE_WORD.search(line)
+               for line in output.splitlines())
+
+
 def cmd_red(args):
     home = _home(args)
     run = _run(home, args.task_id)
@@ -472,7 +486,7 @@ def cmd_red(args):
     covered = sorted({t for tests in covers.values() for t in tests})
     commit = gitio.commit_with_path(wt, test_path, f"test({run['task_id']}): red test")
     test_source = gitio.file_at(wt, commit, test_path)
-    absent = [t for t in covered if not _named(re.split(r"::|\.", t)[-1], test_source)]
+    absent = [t for t in covered if not _named(_short_test_name(t), test_source)]
     if absent:
         raise StateError(f"refusing red: covers names tests not in the red commit's {test_path}: {absent}")
     obs = _run_on_commit(home, run, wt, commit, command)
@@ -494,7 +508,7 @@ def cmd_red(args):
             "output": combined[-4000:],
         })
         raise StateError(f"red output lacks the expected failure marker: {args.marker!r}")
-    passing = [t for t in covered if not _named(t, combined)]
+    passing = [t for t in covered if not _reported_failing(t, combined)]
     if passing:
         _save(home, run, "red-failed", {
             "step": "red", "exit_code": obs["exit_code"],
