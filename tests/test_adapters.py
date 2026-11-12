@@ -10,6 +10,7 @@ READ is uncertain (state unknown), never denied or rejected; and a
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import threading
@@ -17,6 +18,19 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
+
+
+def _loopback_denied():
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+    except PermissionError:
+        return True
+    return False
+
+
+CAGED = "binding loopback TCP is denied here, as inside a t12 verification cage"
+LOOPBACK_DENIED = _loopback_denied()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANDIDATE = "a" * 40
@@ -320,6 +334,7 @@ class FakeAsana(BaseHTTPRequestHandler):
         return self._json(404, {"errors": [{"message": "not found"}]})
 
 
+@unittest.skipIf(LOOPBACK_DENIED, CAGED)
 class AdapterCase(unittest.TestCase):
     SERVER_CLASS = None
 
@@ -789,6 +804,7 @@ class BitbucketAdapterCase(ForgeContract, AdapterCase):
         self.assertEqual(data["outcome"], "confirmed")
 
 
+@unittest.skipIf(LOOPBACK_DENIED, CAGED)
 class EndToEndCase(unittest.TestCase):
     """One real factory run, then each forge adapter against its fake
     server, then `t12 deliver` recording the confirmed outcome."""

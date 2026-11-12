@@ -17,6 +17,19 @@ from t12 import runner, sandbox
 from t12.errors import RunnerError, StateError
 
 
+def _loopback_denied():
+    try:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+    except PermissionError:
+        return True
+    return False
+
+
+CAGED = "binding loopback TCP is denied here, as inside a t12 verification cage"
+LOOPBACK_DENIED = _loopback_denied()
+
+
 class FlagTest(unittest.TestCase):
     def test_forbidden_flags_blocked(self):
         for argv in (
@@ -116,6 +129,7 @@ class LandlockTest(unittest.TestCase):
         self.assertIn("PermissionError", obs["stderr"])
         self.assertFalse(os.path.exists(target))
 
+    @unittest.skipIf(LOOPBACK_DENIED, CAGED)
     def test_localhost_tcp_denied_but_allowed_without_sandbox(self):
         server = socketserver.TCPServer(("127.0.0.1", 0), socketserver.BaseRequestHandler)
         port = server.server_address[1]
