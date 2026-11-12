@@ -236,7 +236,8 @@ class CliCase(unittest.TestCase):
             "red", "--home", self.home, "--task-id", "demo-1",
             "--test-path", "tests/test_skip.py",
             "--command", "python3 -m unittest tests.test_skip -v",
-            "--marker", "FAILED", "--session", "sess-test-writer", expect=1,
+            "--marker", "FAILED", "--session", "sess-test-writer",
+            "--covers", json.dumps({"0": ["test_x"], "1": ["test_x"]}), expect=1,
         )
         self.assertIn("skipped", result.stderr)
         self.assertIn("socket", result.stderr)
