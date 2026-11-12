@@ -35,6 +35,7 @@ bin/t12 red --home /path/to/state-home --task-id demo-1 \
   --marker "FAILED"
 
 # 4. Ask the builder to implement, then pin the candidate
+#    (see "Caging the builder" to run it away from .git and the state home)
 bin/t12 context --home /path/to/state-home --task-id demo-1 \
   --role builder --phase implement
 bin/t12 stage --home /path/to/state-home --task-id demo-1
@@ -305,6 +306,67 @@ the host. The `docker` sandbox adapter is not available inside the
 container, and a task that requests it is refused at `prepare`.
 Reaching Docker from inside would mean mounting the Docker socket,
 which gives the container root on the host.
+
+## Caging the builder
+
+`bin/t12-cage` runs the builder's command in a Landlock cage, so a
+builder cannot tamper with what the factory later trusts:
+
+```sh
+bin/t12-cage --home /path/to/state-home --task-id demo-1 -- <builder command...>
+bin/t12-cage commit --home /path/to/state-home --task-id demo-1 \
+  --message "feat: implement demo"
+bin/t12 stage --home /path/to/state-home --task-id demo-1
+```
+
+Inside the cage the command starts in the run's worktree and can
+write only the worktree and a private temp dir (`TMPDIR`, removed on
+exit). It can read the system directories and the shared `.git`, so
+`git status`, `git diff`, and `git log` work. It cannot write the
+shared `.git` (hooks, config, `refs/replace`, `info/attributes`) or
+the state home, and it cannot open TCP connections. UDP stays open,
+so the cage does not stop data from leaving. Git inside the cage
+reads no global config, and the `XDG_*_HOME` directories point into
+the private temp dir, because your own are not readable there.
+
+The command runs in its own PID namespace. No process it started
+outlives `t12-cage`, including one that detached with a double fork
+and `setsid`: the kernel kills them all when `t12-cage` returns, when
+`SIGINT`, `SIGTERM`, or `SIGHUP` stops it, and when it is killed with
+`SIGKILL`. After a `SIGKILL` they die a moment later, and the private
+temp dir stays behind. The command cannot signal or limit a process
+outside the namespace. Tools that read `/proc`, such as `ps`, still
+list the host's processes there, under pids that mean nothing inside
+the cage.
+
+The cage needs Linux with Landlock ABI 5 or later (kernel 6.10) and
+unprivileged user namespaces, which a PID namespace requires. Some
+hosts turn those off (`kernel.unprivileged_userns_clone=0`,
+`user.max_user_namespaces=0`, Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=1`, Docker's default
+seccomp profile). When either is missing, `t12-cage` exits non-zero
+and does not run the command. The user namespace maps only your own
+uid and gid, so files owned by anyone else show as `nobody`. Inside
+another Landlock cage that makes `/proc` read-only, as in this repo's
+own gates, `t12-cage` cannot write that map. It says so on stderr and
+the command then sees uid 65534 for itself and for every file. File
+access is the same either way.
+
+| Option | Effect |
+|---|---|
+| `--read PATH` | Also let the command read PATH (repeatable). An agent CLI installed under your home directory needs this. |
+| `--write DIR` | Also let the command write DIR (repeatable). Refused when DIR overlaps the shared `.git` or the state home. |
+| `--network` | Allow TCP, for a builder that calls a model. UDP is open either way. |
+
+A linked worktree keeps its index and refs in the shared `.git`, so
+a caged builder cannot commit. Run `t12-cage commit` yourself,
+outside the cage, after `t12-cage` ends. It commits every change in
+the worktree on the run's branch. It refuses when the worktree's
+`.git` pointer file is not the one `prepare` wrote, or when the
+worktree contains a nested git repository. It passes git the git dir
+`prepare` created and runs no hooks. When it refuses, stop the run:
+`t12` commands do not make these checks themselves. CONTEXT.md lists
+what the cage leaves open.
 
 ## Tests
 
