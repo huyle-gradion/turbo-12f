@@ -142,9 +142,14 @@ def commit_with_path(repo, rel_path, message):
 
 
 def file_at(repo, commit, rel_path):
-    """The file's text at `commit`, or None when the commit lacks it."""
-    if git(repo, "cat-file", "-e", f"{commit}:{rel_path}")["exit_code"] != 0:
+    """The file's text at `commit`, or None when the commit lacks it.
+    A folder at the path is an error, not an absence: reading the
+    profile as missing would drop every rule in it."""
+    obs = git(repo, "cat-file", "-t", f"{commit}:{rel_path}")
+    if obs["exit_code"] != 0:
         return None
+    if obs["stdout"].strip() != "blob":
+        raise GitError(f"{rel_path} at {commit[:12]} is a {obs['stdout'].strip()}, not a file")
     return git_ok(repo, "show", f"{commit}:{rel_path}", strip=False)
 
 

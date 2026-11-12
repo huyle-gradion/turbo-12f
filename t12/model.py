@@ -122,7 +122,7 @@ def bound_sessions(run):
         bound[record["session"]] = role
     for gate in run["gates"]:
         if gate.get("run_by"):
-            bound[gate["run_by"]] = "qa"
+            bound[gate["run_by"]] = gate.get("run_by_role", "qa")
     for review in run.get("reviews") or []:
         bound[review["session"]] = review["role"]
     return bound

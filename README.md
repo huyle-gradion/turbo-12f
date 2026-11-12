@@ -96,7 +96,7 @@ merge — a human merges.
 | `context` | Print the role's prompt and skills + minimal context (Factor 2/3/9); the JSON's `instructions` lists the source, path and SHA-256 of each file used |
 | `red` | Run the test command, expect failure + marker, commit the test, record red evidence |
 | `stage` | Pin the candidate commit; verify ancestry, clean tree, unchanged test blob |
-| `gate` | Run one gate in order; failure counts against the repair cap |
+| `gate` | Run one gate in order; failure counts against the repair cap (`--role` names a qa-kind role, default `qa`) |
 | `replay` | Re-run the exact red command on the candidate; expect success |
 | `review` | Record a review by any review role of the run: `--role R --session S --verdict approve\|changes-requested --report FILE` |
 | `green` | Re-hash and re-validate all evidence; requires replay + approving reviews; certify `local-verified` |

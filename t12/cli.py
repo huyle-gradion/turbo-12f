@@ -522,13 +522,16 @@ def cmd_gate(args):
         raise StateError(f"gate requires phase 'gates', run is {run['phase']!r}")
     model.check_budgets(run)
     _require_probes(run)
-    model.check_session(run, "qa", args.session)
+    if model.role_kind(run, args.role) != "qa":
+        raise StateError(f"gates run under a qa-kind role; {args.role!r} is not one")
+    model.check_session(run, args.role, args.session)
     wt = _check_candidate_tree(run, "gate")
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
     obs = _run_on_commit(home, run, wt, run["candidate"]["commit"], gate["command"])
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
+    gate["run_by_role"] = args.role
     gate["commit"] = run["candidate"]["commit"]
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
@@ -1170,6 +1173,7 @@ def build_parser():
     p = sub.add_parser("gate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--name", required=True); p.add_argument("--session", required=True,
                    help="QA session id (must differ from the builder session)")
+    p.add_argument("--role", default="qa", help="a qa-kind role from the run (default qa)")
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("replay"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)

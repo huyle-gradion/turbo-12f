@@ -1467,6 +1467,38 @@ class CliCase(unittest.TestCase):
         self.assertIn("Check every label against the glossary.", prompt)
         self.assertNotIn("Approve everything.", prompt)
 
+    def test_a_project_qa_role_runs_gates_under_its_own_session(self):
+        self.commit_profile(roles={"qa2": {"kind": "qa"}})
+        home, task = self.prepare_custom("demo-qa2")
+        self.t12("prepare", "--home", home, "--task", task)
+        self.red_then_implement(home, "demo-qa2")
+        self.t12("stage", "--home", home, "--task-id", "demo-qa2", "--session", "sess-builder")
+        self.act_in(home, "demo-qa2", "qa2", "sess-q2", {"tool": "qa_report", "args": {
+            "verdict": "pass", "commands": [], "failures": []}})
+        result = self.t12("gate", "--home", home, "--task-id", "demo-qa2", "--name", "unit",
+                          "--session", "sess-r", "--role", "reviewer", expect=1)
+        self.assertIn("not one", result.stderr)
+        self.t12("gate", "--home", home, "--task-id", "demo-qa2", "--name", "unit",
+                 "--session", "sess-q2", "--role", "qa2")
+        result = self.t12("stage", "--home", home, "--task-id", "demo-qa2",
+                          "--session", "sess-q2", expect=1)
+        self.assertIn("already bound to the qa2 role", result.stderr)
+
+    def test_a_prompt_that_names_a_folder_is_refused_at_prepare(self):
+        self.write_repo(".t12/prompts/sub/a.md", "nested\n")
+        self.commit_profile(roles={"ux-copy": {"kind": "review", "prompt": "sub"}})
+        home, task = self.prepare_custom("demo-folder")
+        result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+        self.assertIn("is a tree, not a file", result.stderr)
+
+    def test_a_folder_in_place_of_the_profile_is_refused(self):
+        self.write_repo(".t12/project.json/x", "{}")
+        self._git(self.repo, "add", ".")
+        self._git(self.repo, "commit", "-qm", "odd profile")
+        home, task = self.prepare_custom("demo-tree-profile")
+        result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+        self.assertIn("is a tree, not a file", result.stderr)
+
     def test_a_role_skill_found_nowhere_is_refused(self):
         self.commit_profile(roles={"builder": {"skills": ["no-such-skill"]}})
         home, task = self.prepare_custom("demo-skill")
