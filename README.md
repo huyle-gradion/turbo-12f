@@ -171,9 +171,13 @@ file only says what is unique to it:
 }
 ```
 
-`prepare` reads the profile from the base commit, never the worktree,
-and stores the merged task in the run. A candidate that edits the
-profile changes nothing for its own run. Unknown keys are refused.
+`prepare` reads the profile from the trunk the state home names
+(`t12 init --trunk`, default `main`), never from the task's `base` or
+the worktree, and stores the merged task in the run. A task cannot
+pick an older commit or another run's branch to get weaker rules, and
+a candidate that edits the profile changes nothing for its own run.
+Unknown keys are refused. A leftover `.t12/policy.json` on trunk stops
+`prepare` until its `security_review_paths` move into the profile.
 
 A task may tighten the profile but never loosen it, because task files
 may come from an issue tracker:
@@ -184,11 +188,17 @@ may come from an issue tracker:
 | `required_reviews` | Both lists apply |
 | `require_probes` | On if either turns it on |
 | `sandbox_adapter`, `sandbox_image` | Refused unless equal |
-| `verify_deps`, budgets | The task wins |
+| `verify_deps` | The task may only narrow the profile's list |
+| budgets | The task wins |
 | `protected_paths`, `security_review_paths` | Profile only; a task may not set them |
 
-`stage` refuses a candidate that changes a protected path since the
-base commit. A move out of a protected path counts as a change to it.
+`stage` refuses a candidate that changes a protected path, measured
+from both the task's base and the point where the candidate leaves
+trunk, so a base carrying another run's unreviewed edit cannot hide
+it. A move out of a protected path counts as a change to it. A
+`verify_deps` entry may not overlap a protected path. Deps still come
+from the builder's worktree, so a builder can put code in `.venv` or
+`node_modules` that a gate runs; the profile does not close that.
 
 ## Running several tasks at once
 

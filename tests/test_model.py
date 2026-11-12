@@ -222,6 +222,24 @@ class ProfileTest(unittest.TestCase):
             with self.assertRaises(StateError, msg=loosen):
                 profile.apply(base, loosen)
 
+    def test_a_task_may_only_narrow_the_profiles_verify_deps(self):
+        base = self.profile(verify_deps=[".venv", "node_modules"])
+        self.assertEqual(profile.apply(base, {"verify_deps": [".venv"]})["verify_deps"], [".venv"])
+        with self.assertRaises(StateError):
+            profile.apply(base, {"verify_deps": ["vendor"]})
+
+    def test_verify_deps_may_not_overlap_a_protected_path(self):
+        base = self.profile(protected_paths=["guards"])
+        for dep in ("guards/__pycache__", "guards"):
+            with self.assertRaises(StateError, msg=dep):
+                profile.apply(base, {"verify_deps": [dep]})
+
+    def test_a_mistyped_task_value_is_a_clear_error(self):
+        base = self.profile(gates=[self.GATE], required_reviews=["reviewer"])
+        for bad in ({"gates": None}, {"required_reviews": None}, {"op_limit": "9"}):
+            with self.assertRaises(StateError, msg=bad):
+                profile.apply(base, bad)
+
     def test_the_task_sets_its_own_budget(self):
         merged = profile.apply(self.profile(op_limit=9), {"op_limit": 40})
         self.assertEqual(merged["op_limit"], 40)

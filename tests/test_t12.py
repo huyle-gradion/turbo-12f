@@ -1271,6 +1271,47 @@ class CliCase(unittest.TestCase):
         self.assertIn("guards/check.py", result.stderr)
         self.assertEqual(self.run_record(home, "demo-move")["phase"], "red")
 
+    def test_the_task_base_cannot_choose_a_weaker_profile(self):
+        before_profile = self._git(self.repo, "rev-parse", "HEAD")
+        self.commit_profile(protected_paths=["guards"])
+        home, task = self.prepare_custom("demo-old-base", base=before_profile)
+        self.t12("prepare", "--home", home, "--task", task)
+        self.assertEqual(self.run_record(home, "demo-old-base")["protected_paths"], ["guards"])
+        self.red_then_implement(home, "demo-old-base", [("guards/check.py", "# loosened\n")])
+        result = self.t12("stage", "--home", home, "--task-id", "demo-old-base",
+                          "--session", "sess-builder", expect=1)
+        self.assertIn("protected paths: guards/check.py", result.stderr)
+
+    def test_a_base_on_another_runs_branch_cannot_hide_its_edits(self):
+        self.commit_profile(protected_paths=["guards"])
+        home, task_a = self.prepare_custom("demo-a")
+        self.t12("prepare", "--home", home, "--task", task_a)
+        wt_a = os.path.join(home, "worktrees", "demo-a")
+        os.makedirs(os.path.join(wt_a, "guards"))
+        with open(os.path.join(wt_a, "guards", "check.py"), "w") as fh:
+            fh.write("# loosened\n")
+        with open(os.path.join(wt_a, ".t12", "project.json"), "w") as fh:
+            fh.write('{"version": 1}')
+        self._git(wt_a, "add", "-A")
+        self._git(wt_a, "commit", "-qm", "chore: loosen the rules, never staged")
+        _, task_b = self.prepare_custom("demo-b", base="task/demo-a")
+        self.t12("prepare", "--home", home, "--task", task_b)
+        self.assertEqual(self.run_record(home, "demo-b")["protected_paths"], ["guards"])
+        self.red_then_implement(home, "demo-b")
+        result = self.t12("stage", "--home", home, "--task-id", "demo-b",
+                          "--session", "sess-builder", expect=1)
+        self.assertIn("protected paths: guards/check.py", result.stderr)
+
+    def test_a_leftover_policy_file_stops_prepare(self):
+        os.makedirs(os.path.join(self.repo, ".t12"))
+        with open(os.path.join(self.repo, ".t12", "policy.json"), "w") as fh:
+            json.dump({"security_review_paths": ["app.py"]}, fh)
+        self._git(self.repo, "add", ".")
+        self._git(self.repo, "commit", "-qm", "old policy")
+        home, task = self.prepare_custom("demo-legacy")
+        result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+        self.assertIn(".t12/policy.json is no longer read", result.stderr)
+
     def test_a_task_cannot_loosen_the_profile(self):
         self.commit_profile(required_reviews=["reviewer"], protected_paths=["guards"])
         home, task = self.prepare_custom("demo-loose", protected_paths=[])

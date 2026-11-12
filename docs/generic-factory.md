@@ -64,12 +64,12 @@ The profile is `.t12/project.json` in the product repo.
 
 Rules that follow from this shape:
 
-- **The profile is read from the base commit, not the worktree.**
-  `prepare` runs `git show <base>:.t12/project.json`, validates it,
-  stores it as evidence, and freezes it in the run record. A builder
-  that edits `.t12/` in its worktree changes nothing for its own
-  run. `green` refuses if the frozen profile hash changed, the same
-  way it treats the task file today.
+- **The profile is read from trunk, not the task's base or the worktree.**
+  `prepare` reads `.t12/project.json` at the trunk commit the state
+  home names, validates it, and freezes the merged settings and the
+  trunk commit in the run record. A task cannot choose an older or
+  unmerged commit to get weaker rules, and a builder that edits
+  `.t12/` changes nothing for its own run.
 - **A task file only holds what is unique to the task.** `id`,
   `title`, `acceptance_criteria`, and an optional `source` ref. Any
   profile key a task sets overrides the profile for that run, and
@@ -105,10 +105,10 @@ the core.
 
 `t12 context --role R` builds the prompt from:
 
-1. The role's prompt: `.t12/prompts/<file>` at the base commit if
+1. The role's prompt: `.t12/prompts/<file>` at the trunk commit if
    the profile names one, else the factory's `prompts/<kind>.md`.
 2. Each skill the role lists: `.t12/skills/<name>/SKILL.md` at the
-   base commit, else the factory's `skills/<name>/SKILL.md`.
+   trunk commit, else the factory's `skills/<name>/SKILL.md`.
 3. `context_docs`, as paths the worker must read. They are listed,
    not inlined, so the context stays small (Factor 3).
 
@@ -169,7 +169,7 @@ A project cannot change:
 - one JSON tool call per worker, with a fixed tool set per kind, so
   every tool maps to a step the core checks (Factor 4)
 - one session per role (Factor 10)
-- that the profile comes from the base commit and is frozen at
+- that the profile comes from trunk and is frozen at
   `prepare`, and that a change to `.t12/` needs a security review.
   This is "the candidate never checks itself" for project settings.
 - that `touches` is enforced at `stage`; without it the queue's
@@ -183,8 +183,8 @@ Each step is one PR on top of the last. Each ends in a check that
 runs against a disposable repo, as the current tests do.
 
 1. **Project profile. Built.** `.t12/project.json` replaces
-   `.t12/policy.json`. Read from base, merged under tighten-only
-   rules, protected paths refused at `stage`.
+   `.t12/policy.json`. Read from the configured trunk, merged under
+   tighten-only rules, protected paths refused at `stage`.
 2. **Roles and skills.** Role-to-kind map, `TOOLS` keyed by kind,
    layered prompt and skill resolution, hashes in the context. The
    check is a project-defined `ux-copy` review role that blocks

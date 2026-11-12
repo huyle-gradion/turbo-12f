@@ -233,7 +233,9 @@ def cmd_init(args):
     for sub in ("", "runs", "evidence", "worktrees"):
         store.mkdir_private(os.path.join(home, sub))
     config_path = os.path.join(home, "config.json")
-    config = {"version": model.VERSION, "repo": repo, "created_at": time.time()}
+    gitio.rev_parse(repo, args.trunk)
+    config = {"version": model.VERSION, "repo": repo, "trunk": args.trunk,
+              "created_at": time.time()}
     if os.path.exists(config_path):
         existing = store.load_json(config_path)
         if existing.get("repo") != repo:
@@ -241,7 +243,7 @@ def cmd_init(args):
                 f"state home already bound to {existing.get('repo')}, not {repo}"
             )
     store.save_json(config_path, config)
-    print(f"init: repo={repo} home={home}")
+    print(f"init: repo={repo} trunk={args.trunk} home={home}")
     return 0
 
 
@@ -251,15 +253,23 @@ def cmd_prepare(args):
     task = store.load_json(args.task)
     task_id = task.get("id")
     with model.run_lock(home, task_id):
-        return _admit(home, config["repo"], task, task_id, args.supersede)
+        return _admit(home, config["repo"], config.get("trunk", "main"), task, task_id,
+                      args.supersede)
 
 
-def _admit(home, repo, task, task_id, supersede):
+def _admit(home, repo, trunk, task, task_id, supersede):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
     base_commit = gitio.rev_parse(repo, base)
-    profile = profile_mod.parse(gitio.file_at(repo, base_commit, profile_mod.PATH))
+    # The rules come from the trunk the state home names, never from the
+    # task's base: a task file could point base at a commit, or another
+    # run's branch, whose profile is weaker or missing.
+    trunk_commit = gitio.rev_parse(repo, trunk)
+    if gitio.file_at(repo, trunk_commit, profile_mod.LEGACY_PATH) is not None:
+        raise StateError(f"{profile_mod.LEGACY_PATH} is no longer read; move its "
+                         f"security_review_paths into {profile_mod.PATH} on {trunk}")
+    profile = profile_mod.parse(gitio.file_at(repo, trunk_commit, profile_mod.PATH))
     task = profile_mod.apply(profile, task)
     for gate in task.get("gates", []):
         try:
@@ -294,6 +304,8 @@ def _admit(home, repo, task, task_id, supersede):
                         sandbox_adapter=adapter, sandbox_image=image)
     for key in profile_mod.SCOPE_KEYS:
         run[key] = profile[key]
+    run["trunk"] = trunk
+    run["trunk_commit"] = trunk_commit
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
@@ -456,7 +468,7 @@ def cmd_stage(args):
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
     sensitive = []
-    if run.get("base_commit") and "protected_paths" not in run:
+    if run.get("base_commit") and "trunk_commit" not in run:
         raise StateError("refusing stage: this run was prepared before project profiles; "
                          "stop it and prepare it again with --supersede")
     if run.get("base_commit"):
@@ -465,6 +477,10 @@ def cmd_stage(args):
         if outside:
             raise StateError("refusing stage: the candidate changes paths outside the "
                              f"task's touches: {', '.join(outside)}")
+        # Measured from where the candidate leaves trunk, so a base that
+        # already carries an unreviewed edit cannot hide it.
+        fork = gitio.merge_base(wt, run["trunk_commit"], candidate)
+        changed = sorted(set(changed) | set(gitio.changed_paths(wt, fork, candidate)))
         protected = [p for p in changed if model.under(p, run["protected_paths"])]
         if protected:
             raise StateError("refusing stage: the candidate changes protected paths: "
@@ -1112,6 +1128,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init"); p.add_argument("--repo", required=True); p.add_argument("--home", required=True)
+    p.add_argument("--trunk", default="main", help="branch whose .t12/project.json every run follows")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("prepare"); p.add_argument("--home", required=True); p.add_argument("--task", required=True)

@@ -1,9 +1,10 @@
 """The project profile: `.t12/project.json` in the product repo.
 
 It holds what every task in a project shares, so a task file only
-says what is unique to the task. `prepare` reads it from the base
-commit, never the worktree, so a run cannot change the rules it is
-checked by. Pure: text in, data out.
+says what is unique to the task. `prepare` reads it from the trunk
+the state home names, never the task's base or the worktree, so a run
+cannot choose or change the rules it is checked by. Pure: text in,
+data out.
 
 A task may tighten what the profile sets but never loosen it. Task
 files can come from an issue tracker, written by anyone who can file
@@ -14,7 +15,10 @@ an issue, so the profile is the floor:
 - require_probes: on if either turns it on.
 - sandbox_adapter, sandbox_image: a task may set them only where the
   profile does not.
-- budgets and verify_deps: the task wins.
+- verify_deps: a task may only narrow the profile's list, and no
+  entry may overlap a protected path, since gates load deps from the
+  builder's worktree.
+- budgets: the task wins.
 - protected_paths, security_review_paths: profile only.
 """
 
@@ -24,6 +28,7 @@ import os
 from .errors import StateError
 
 PATH = ".t12/project.json"
+LEGACY_PATH = ".t12/policy.json"
 VERSION = 1
 
 
@@ -53,6 +58,14 @@ def _fixed(key):
     return merge
 
 
+def _subset(profile_value, task_value):
+    wider = sorted(set(map(os.path.normpath, task_value)) -
+                   set(map(os.path.normpath, profile_value)))
+    if wider:
+        raise StateError(f"task verify_deps {wider} are not in the project profile's list")
+    return task_value
+
+
 def _task_wins(profile_value, task_value):
     return task_value
 
@@ -63,7 +76,7 @@ TASK_KEYS = {
     "require_probes": (bool, _either),
     "sandbox_adapter": (str, _fixed("sandbox_adapter")),
     "sandbox_image": (str, _fixed("sandbox_image")),
-    "verify_deps": (list, _task_wins),
+    "verify_deps": (list, _subset),
     "time_limit_s": (int, _task_wins),
     "op_limit": (int, _task_wins),
     "repair_cap": (int, _task_wins),
@@ -100,12 +113,16 @@ def parse(text):
     if data.get("version") != VERSION:
         raise StateError(f"{PATH}: version must be {VERSION}, got {data.get('version')!r}")
     for key, (kind, _) in TASK_KEYS.items():
-        if key in data and (not isinstance(data[key], kind) or
-                            (kind is int and isinstance(data[key], bool))):
-            raise StateError(f"{PATH}: {key} must be a {kind.__name__}")
+        if key in data:
+            _check_type(PATH, key, data[key], kind)
     for key in SCOPE_KEYS:
         data[key] = _paths(key, data.get(key, []))
     return data
+
+
+def _check_type(where, key, value, kind):
+    if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+        raise StateError(f"{where}: {key} must be a {kind.__name__}")
 
 
 def apply(profile, task):
@@ -115,10 +132,17 @@ def apply(profile, task):
         if key in task:
             raise StateError(f"{key} belongs in {PATH}, not in a task file")
     merged = dict(task)
-    for key, (_, merge) in TASK_KEYS.items():
+    for key, (kind, merge) in TASK_KEYS.items():
+        if key in task:
+            _check_type("task", key, task[key], kind)
         if key not in profile:
             continue
         merged[key] = merge(profile[key], task[key]) if key in task else profile[key]
+    for dep in merged.get("verify_deps", []):
+        for root in profile["protected_paths"]:
+            dep_path = os.path.normpath(dep)
+            if dep_path == root or dep_path.startswith(root + os.sep) or root.startswith(dep_path + os.sep):
+                raise StateError(f"verify_deps entry {dep!r} overlaps protected path {root!r}")
     return merged
 
 
