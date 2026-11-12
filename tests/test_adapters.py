@@ -283,8 +283,9 @@ class GitHubAdapterCase(AdapterCase):
         sent = FakeGitHub.BODIES[0]
         body = sent["body"]
         self.assertEqual(re.findall(r"#\d+", body), ["#12"])
-        self.assertIn("closes #\u206042", body)
-        self.assertIn("owner/other#\u20607", body)
+        self.assertIn("c\u2060loses #\u206042", body)
+        self.assertIn("f\u2060ixes owner/other#\u20607", body)
+        self.assertNotRegex(body.replace("Closes #12", ""), r"(?i)\b(close[sd]?|fix(e[sd])?|resolve[sd]?)\b")
         visible = outside_fences(body)
         self.assertIn("Closes #12", visible)
         self.assertIn(f"Source: {url}", visible)
@@ -292,7 +293,7 @@ class GitHubAdapterCase(AdapterCase):
             for text in ("Fixes", "closes", "<!--", "````"):
                 self.assertNotIn(text, line)
         self.assertIn("a ```` run cannot end the block", body)
-        self.assertEqual(sent["title"], "Fixes #\u206041")
+        self.assertEqual(sent["title"], "F\u2060ixes #\u206041")
 
     def test_an_explicit_body_is_used_as_given(self):
         source = {"adapter": "github-issues", "ref": "o/r#12"}

@@ -52,11 +52,15 @@ def source_lines(source, issue_adapter, repo):
 
 
 ISSUE_REF_RE = re.compile(r"#(?=\d)")
+CLOSING_KEYWORD_RE = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b", re.I)
 
 
 def break_issue_refs(text):
-    """Text with no `#N` issue reference left: a WORD JOINER follows each
-    `#` before a digit, so a forge neither links nor closes it."""
+    """Text that can neither link nor close an issue: a WORD JOINER
+    follows each `#` before a digit and splits every closing keyword.
+    Splitting the keyword covers every reference form (`#N`, `GH-N`,
+    an issue URL, `owner/repo#N`) at once."""
+    text = CLOSING_KEYWORD_RE.sub(lambda m: m.group(1)[0] + "\u2060" + m.group(1)[1:], text)
     return ISSUE_REF_RE.sub("#\u2060", text)
 
 
@@ -184,11 +188,9 @@ def write_report(path, data):
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
-CRITERIA_HEADING_RE = re.compile(r"^acceptance criteria:?$", re.I)
+CRITERIA_HEADING_RE = re.compile(r"^acceptance criteria\b", re.I)
 ITEM_RE = re.compile(r"^\s*[-*]\s+(?:\[[ xX]\]\s+)?(.+?)\s*$")
 LABELLED_RE = re.compile(r"^\s*(touches|depends[ _-]?on)\s*:\s*(.*?)\s*$", re.I)
-FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
-COMMENT_RE = re.compile(r"<!--.*?-->")
 MAX_CRITERIA = 50
 MAX_TEXT = 1000
 PER_PAGE = 100
@@ -199,37 +201,20 @@ class IntakeError(Exception):
     """The adapter could not establish the issue list; nothing is written."""
 
 
-def _visible_lines(body):
-    """Lines of the body that a forge renders as text: outside code
-    fences and HTML comments. The maintainer who applies the label
-    reads only these. An unclosed `<!--` hides the rest of the body."""
-    fenced = in_comment = False
-    for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if fenced:
-            fenced = not FENCE_RE.match(line)
-            continue
-        if in_comment:
-            end = line.find("-->")
-            if end < 0:
-                continue
-            line, in_comment = line[end + 3:], False
-        elif FENCE_RE.match(line):
-            fenced = True
-            continue
-        line = COMMENT_RE.sub("", line)
-        start = line.find("<!--")
-        if start >= 0:
-            line, in_comment = line[:start], True
-        yield line
-
-
 def parse_body(body, id_prefix):
     """(fields, problem) from an issue body. Fields hold only
     `acceptance_criteria` and, when labelled, `touches` and
     `depends_on`; problem is why the issue cannot become a task."""
+    # Intake cannot tell exactly what a forge hides: comment and fence
+    # rules differ between parsers, and a wrong guess either reads text
+    # the maintainer never saw or drops a scope line they did see. So an
+    # issue with a comment is refused, and every other line is read,
+    # fenced or not; visible code can only narrow a task.
+    if "<!--" in (body or ""):
+        return None, "the body contains an HTML comment, so intake cannot be sure what the page shows"
     criteria, in_section, seen = [], False, False
     labelled = {}
-    for line in _visible_lines(body):
+    for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         heading = HEADING_RE.match(line)
         if heading:
             in_section = not seen and bool(CRITERIA_HEADING_RE.match(heading.group(1)))

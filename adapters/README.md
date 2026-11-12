@@ -84,15 +84,17 @@ that carry it are read, open ones only, and pull requests are
 ignored.
 
 **The issue format.** The body must have a heading named
-"Acceptance criteria" (any level, case-insensitive) followed by a
-`- ` or `* ` list, or a `- [ ]` checklist, until the next heading.
-Each item is one criterion. Anything inside a code fence or an HTML
-comment (`<!-- ... -->`) is ignored: the forge does not render a
-comment, so the maintainer who applied the label never saw it. An
-unclosed `<!--` hides the rest of the body.
+"Acceptance criteria" (any level, case-insensitive, optionally
+followed by a note such as "(Testable)") followed by a `- ` or `* `
+list, or a `- [ ]` checklist, until the next heading. Each item is one
+criterion. An issue whose body contains `<!--` anywhere is skipped:
+the forge hides comment text from the maintainer who applied the
+label, and forges disagree on what an odd comment or fence hides, so
+intake does not guess. Every other line is read, code fences
+included; visible text in a code block can only narrow a task.
 An issue without such a list is skipped and the reason is printed;
-intake never invents criteria. Two optional lines, anywhere outside
-a code fence or comment, and only as `Name: value`:
+intake never invents criteria. Two optional lines, anywhere, and only
+as `Name: value`:
 
 ```text
 Touches: src/auth, tests/auth

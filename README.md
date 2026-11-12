@@ -259,8 +259,10 @@ optional `touches` and `depends_on`, and
 `source: {"adapter", "ref", "url"}`. Gates, reviews, sandbox and
 everything else the profile controls never come from an issue, and
 re-running intake changes nothing that is unchanged or already has a
-run. Text inside an HTML comment is ignored, because the forge does
-not show it to the maintainer who applies the label. When an issue
+run. An issue whose body contains an HTML comment is skipped, because
+the forge hides comment text from the maintainer who applies the
+label and intake cannot match every forge's rules for what is hidden.
+When an issue
 loses its label or closes, the next intake run deletes its queued
 task file, unless the task already has a run. GitLab works the same
 through `adapters/gitlab-issues.py`. The formats and failure rules
