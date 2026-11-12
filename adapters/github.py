@@ -10,6 +10,12 @@ Usage:
         --out report.json [--repo owner/name] [--title T] [--body B] \
         [--api-base https://api.github.com] [--timeout 10]
 
+The default body links the run's `source`: `Closes #N` when the task
+came from an issue in this same repo, else a plain `Source:` link. The
+task's title, criteria and manifest follow in code blocks, with issue
+references broken, because an issue author may have written them. An
+explicit --body is used as given.
+
 Token from GITHUB_TOKEN. Exit 0 means a report was written (whatever
 the outcome); non-zero means the adapter could not run at all.
 
@@ -30,9 +36,8 @@ from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    change_request_body, missing_branch_outcome, mutation_outcome, origin_url, read_outcome,
-    read_run,
-    report, request, write_report,
+    break_issue_refs, change_request_body, missing_branch_outcome, mutation_outcome, origin_url,
+    read_outcome, read_run, report, request, write_report,
 )
 
 
@@ -60,9 +65,11 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
     branch = run["branch"]
     base = run["base"]
     if body is None:
-        body = change_request_body(home, task_id, run, candidate)
+        body = change_request_body(home, task_id, run, candidate, "github-issues", repo)
     if title is None:
-        title = run["title"]
+        # A squash merge makes the title a commit message on the default
+        # branch, where a closing keyword in it closes the issue.
+        title = break_issue_refs(run["title"])
 
     def fail(outcome, detail, ref=None):
         data = report("github", task_id, candidate, outcome, ref, detail)

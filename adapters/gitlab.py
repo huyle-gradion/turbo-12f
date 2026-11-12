@@ -34,7 +34,7 @@ from urllib.parse import quote, urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    change_request_body, missing_branch_outcome, mutation_outcome, origin_url, parse_remote,
+    break_issue_refs, change_request_body, missing_branch_outcome, mutation_outcome, origin_url, parse_remote,
     read_outcome, read_run, report, request, write_report,
 )
 
@@ -57,9 +57,9 @@ def create_mr(home, task_id, project, title, body, base_url, timeout, token):
         raise SystemExit("error: run has no staged candidate")
     branch = run["branch"]
     if body is None:
-        body = change_request_body(home, task_id, run, candidate)
+        body = change_request_body(home, task_id, run, candidate, "gitlab-issues", project)
     if title is None:
-        title = run["title"]
+        title = break_issue_refs(run["title"])
     api = f"{base_url}/api/v4/projects/{quote(project, safe='')}"
     encoded_branch = quote(branch, safe="")
 

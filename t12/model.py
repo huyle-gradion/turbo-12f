@@ -12,18 +12,13 @@ import re
 import time
 
 from . import limits as limits_mod
+from . import profile as profile_mod
 from . import store
 from .errors import BudgetError, StateError
 
 VERSION = 1
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 PROVENANCE = "observed-helper-execution"
-
-# Roles that run as separate worker invocations. A session id may be
-# bound to exactly one role per run: the same worker cannot write the
-# tests and the implementation, or review its own code.
-SESSION_ROLES = ("test-writer", "builder", "qa", "reviewer", "security")
-REVIEW_ROLES = ("reviewer", "security")
 
 PHASES = (
     "unadmitted",
@@ -127,16 +122,31 @@ def bound_sessions(run):
         bound[record["session"]] = role
     for gate in run["gates"]:
         if gate.get("run_by"):
-            bound[gate["run_by"]] = "qa"
+            bound[gate["run_by"]] = gate.get("run_by_role", "qa")
     for review in run.get("reviews") or []:
         bound[review["session"]] = review["role"]
+    for record in run.get("bindings") or []:
+        bound[record["session"]] = record["role"]
     return bound
+
+
+def role_kind(run, role):
+    """The kind of a role in the run's frozen role map."""
+    roles = run.get("role_map")
+    if roles is None:
+        raise StateError("this run was prepared before named roles; "
+                         "stop it and prepare it again with --supersede")
+    if role not in roles:
+        raise StateError(f"role {role!r} is not in this run; roles are {sorted(roles)}")
+    return roles[role]["kind"]
 
 
 def check_session(run, role, session):
     """One session per role per run. A session already bound to a
     different role cannot take this one — that would collapse the
-    separation the roles exist to enforce."""
+    separation the roles exist to enforce: the same worker cannot write
+    the tests and the implementation, or review its own code."""
+    role_kind(run, role)
     if not session or not str(session).strip():
         raise StateError(f"--session is required for the {role} role")
     bound = bound_sessions(run)
@@ -151,6 +161,10 @@ def check_session(run, role, session):
 def bind_session(run, role, session):
     check_session(run, role, session)
     run.setdefault("roles", {})[role] = {"session": session, "at": time.time()}
+    # roles keeps the latest session per role; the history keeps every
+    # one, so a re-run under a new session does not free the old one to
+    # take another role.
+    run.setdefault("bindings", []).append({"role": role, "session": session})
 
 
 def latest_review(run, role, commit=None):
@@ -260,25 +274,6 @@ def outside_touches(run, paths):
     return [p for p in paths if not under(p, touches)]
 
 
-POLICY_PATH = ".t12/policy.json"
-
-
-def security_paths(policy_text):
-    """Paths whose change requires a security review, from the policy
-    file as it stands on the base commit. The policy folder is always
-    one of them, so a candidate can neither drop an entry nor add the
-    first policy without a security review."""
-    if policy_text is None:
-        return [os.path.dirname(POLICY_PATH)]
-    try:
-        paths = json.loads(policy_text).get("security_review_paths", [])
-    except (ValueError, AttributeError) as exc:
-        raise StateError(f"{POLICY_PATH} on the base commit is not a JSON object") from exc
-    if not isinstance(paths, list) or not all(_is_worktree_path(p) for p in paths):
-        raise StateError(f"{POLICY_PATH}: security_review_paths must be relative paths: {paths!r}")
-    return [os.path.normpath(p) for p in paths] + [os.path.dirname(POLICY_PATH)]
-
-
 def _is_worktree_path(path):
     if not isinstance(path, str) or not path or os.path.isabs(path):
         return False
@@ -293,7 +288,28 @@ def open_escalation(run):
     return None
 
 
-def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
+SOURCE_URL_RE = re.compile(r"https?://\S+")
+
+
+def _source(task):
+    """Where the task came from, as an intake adapter wrote it. Kept to
+    one line per field so a delivery adapter can quote it in a change
+    request without escaping."""
+    source = task.get("source")
+    if source is None:
+        return None
+    url = source.get("url") if isinstance(source, dict) else None
+    if (not isinstance(source, dict) or set(source) - {"adapter", "ref", "url"}
+            or not all(isinstance(source.get(k), str) and re.fullmatch(r"\S+", source[k])
+                       for k in ("adapter", "ref"))
+            or (url is not None and not (isinstance(url, str) and SOURCE_URL_RE.fullmatch(url)))):
+        raise StateError(
+            'source must be {"adapter": str, "ref": str, "url": http(s) URL (optional)}, '
+            f"each without whitespace: {source!r}")
+    return {"adapter": source["adapter"], "ref": source["ref"], "url": url}
+
+
+def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
     defaults = defaults or limits_mod.BUILTIN_DEFAULTS
@@ -318,10 +334,11 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
     if not task.get("acceptance_criteria"):
         raise StateError("task must declare at least one acceptance criterion")
     required_reviews = task.get("required_reviews", ["reviewer"])
+    reviewers = profile_mod.review_roles(roles)
     if not isinstance(required_reviews, list) or any(
-            r not in REVIEW_ROLES for r in required_reviews):
+            r not in reviewers for r in required_reviews):
         raise StateError(
-            f"required_reviews must be a list of {list(REVIEW_ROLES)}: {required_reviews!r}"
+            f"required_reviews must be a list of review roles {reviewers}: {required_reviews!r}"
         )
     verify_deps = task.get("verify_deps", [])
     if not isinstance(verify_deps, list) or not all(_is_worktree_path(d) for d in verify_deps):
@@ -345,6 +362,7 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
     if not isinstance(depends_on, list) or not all(
             isinstance(d, str) and TASK_ID_RE.match(d) for d in depends_on):
         raise StateError(f"depends_on must be a list of task ids: {depends_on!r}")
+    source = _source(task)
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -355,6 +373,7 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
         "base_commit": base_commit,
         "touches": touches,
         "depends_on": list(depends_on),
+        "source": source,
         "branch": task.get("branch") or f"task/{task['id']}",
         "worktree": os.path.join(home, "worktrees", task["id"]),
         "phase": "unadmitted",
@@ -381,6 +400,7 @@ def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
         "probes": [],
         "sandbox_adapter": sandbox_adapter,
         "sandbox_image": sandbox_image,
+        "role_map": roles,
         "roles": {},
         "reviews": [],
         "required_reviews": list(required_reviews),

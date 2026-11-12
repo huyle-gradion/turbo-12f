@@ -1,6 +1,9 @@
 # Generic factory: one factory, many projects
 
-Status: proposal, not built. Nothing in this file is enforced yet.
+Status: steps 1 (project profile), 2 (roles and skills) and 4 (intake)
+are built;
+the rest is a proposal.
+README.md describes what is enforced today.
 
 ## Goal
 
@@ -11,21 +14,19 @@ green) the same for every project.
 
 ## What is project-specific today
 
-The core has no chat-bridge strings, but five things are fixed in
-code and only change by editing the factory:
+The core has no chat-bridge strings. Before step 2, five
+things were fixed in code and only changed by editing the factory.
+Two still are:
 
 | Concern | Where it is fixed today |
 |---|---|
-| Roles | `ROLES` in `t12/cli.py`, `SESSION_ROLES` and `REVIEW_ROLES` in `t12/model.py` |
-| Worker tools | `TOOLS` in `t12/tools.py`, keyed by role name |
-| Prompts and skills | `prompts/<role>.md` and `skills/<role>/` in the factory checkout |
 | Task intake | hand-written `task.json` only; every task repeats gates, sandbox, `verify_deps` |
 | Delivery | `ADAPTERS` in `t12/delivery.py`; GitHub, GitLab, Bitbucket and Asana scripts |
 
 chat-bridge works around this with its own in-repo factory
 (`chat-bridge/factory/`), which hardcodes `PROTECTED_PATHS`, its
-gate ladder, and its lanes. turbo-12f has no protected-path check
-at all, so it cannot yet enforce the rule that `guards/`, `e2e/`,
+gate ladder, and its lanes. Before the project profile, turbo-12f had
+no protected-path check at all, so it could not enforce the rule that `guards/`, `e2e/`,
 `bench/`, and `docs/health/` are read-only to the builder.
 
 ## Data shape
@@ -63,12 +64,12 @@ The profile is `.t12/project.json` in the product repo.
 
 Rules that follow from this shape:
 
-- **The profile is read from the base commit, not the worktree.**
-  `prepare` runs `git show <base>:.t12/project.json`, validates it,
-  stores it as evidence, and freezes it in the run record. A builder
-  that edits `.t12/` in its worktree changes nothing for its own
-  run. `green` refuses if the frozen profile hash changed, the same
-  way it treats the task file today.
+- **The profile is read from trunk, not the task's base or the worktree.**
+  `prepare` reads `.t12/project.json` at the trunk commit the state
+  home names, validates it, and freezes the merged settings and the
+  trunk commit in the run record. A task cannot choose an older or
+  unmerged commit to get weaker rules, and a builder that edits
+  `.t12/` changes nothing for its own run.
 - **A task file only holds what is unique to the task.** `id`,
   `title`, `acceptance_criteria`, and an optional `source` ref. Any
   profile key a task sets overrides the profile for that run, and
@@ -93,9 +94,14 @@ how to enforce. There are four kinds:
 | `qa` | `qa_report` | records the report |
 | `review` | `review` | records a verdict; `required_reviews` names which review roles green needs |
 
-All kinds may call `escalate`. `TOOLS` is keyed by kind instead of
-role, and `SESSION_ROLES` / `REVIEW_ROLES` are derived from the
-frozen profile. The one-session-per-role rule is unchanged. A
+All kinds may call `escalate`. `TOOLS` is keyed by kind. `prepare`
+merges the built-in roles (test-writer, builder, qa, and reviewer and
+security as `review`) with the profile's `roles`, and freezes the
+result in the run record as `role_map`. `act`, `review`, `context`,
+session binding, and `required_reviews` all check roles against that
+map. A project may add roles and set a prompt or skills on a
+built-in, but may not change a built-in's kind. A task file may not
+set `roles`. The one-session-per-role rule is unchanged. A
 project adds a reviewer (UX copy, accessibility, data privacy) by
 adding a `review` role with its own prompt. It needs no change to
 the core.
@@ -104,27 +110,33 @@ the core.
 
 `t12 context --role R` builds the prompt from:
 
-1. The role's prompt: `.t12/prompts/<file>` at the base commit if
-   the profile names one, else the factory's `prompts/<kind>.md`.
+1. The role's prompt: `.t12/prompts/<file>` at the trunk commit if
+   the profile names one, else the factory's prompt. A built-in role
+   keeps its file (`prompts/reviewer.md`, `prompts/security.md`); a
+   project role gets the prompt of the first built-in role of its
+   kind, so a `ux-copy` review role starts from `prompts/reviewer.md`.
 2. Each skill the role lists: `.t12/skills/<name>/SKILL.md` at the
-   base commit, else the factory's `skills/<name>/SKILL.md`.
+   trunk commit, else the factory's `skills/<name>/SKILL.md`. A skill
+   found in neither place is an error, at `prepare` and at `context`.
 3. `context_docs`, as paths the worker must read. They are listed,
-   not inlined, so the context stays small (Factor 3).
+   not inlined, so the context stays small (Factor 3). Not built yet.
 
-The context JSON records the blob hash of every prompt and skill it
-used, so a review can tell which instructions a worker saw.
+The context JSON's `instructions` list records the source (`project`
+or `factory`), path, and SHA-256 of every prompt and skill it used,
+so a review can tell which instructions a worker saw.
 
 ### Intake and delivery are adapters with a fixed contract
 
 Adapters stay separate programs that hold credentials. The core
 never imports one (this is unchanged).
 
-- **Intake** (`t12 intake --home H`) runs the profile's intake
-  adapter. The adapter writes task files in the task schema, each
-  with `source: {"adapter": "github-issues", "ref": "...", "url": "..."}`.
-  `prepare` admits them as it admits a hand-written task. Planned
-  adapters are `file`, `github-issues`, `gitlab-issues`, `jira`,
-  `linear`, and `asana`.
+- **Intake** is an adapter run as `adapters/<name>.py intake
+  --repo-config <profile> --out-dir <queue dir>`. It writes task
+  files in the task schema, each with
+  `source: {"adapter": "github-issues", "ref": "o/r#12", "url": "..."}`,
+  and never a profile-controlled key. `bin/t12-queue` admits them as
+  it admits a hand-written task. Built: `github-issues`,
+  `gitlab-issues`. Planned: `file`, `jira`, `linear`, `asana`.
 - **Delivery** keeps today's report schema and four outcomes. The
   `ADAPTERS` tuple is replaced by the profile's `delivery` list.
   `deliver` refuses an adapter the frozen profile does not name.
@@ -140,33 +152,51 @@ never imports one (this is unchanged).
   with those tokens. A project that needs a custom adapter puts it
   in `<state-home>/adapters/` and names it in the profile.
 
-## Workflow: configurable inside fixed invariants
+## Workflow: as configurable as the invariants allow
 
-The phase machine (`ready, red, gates, green, local-verified`) does
-not become configurable. It is the reason a `local-verified` run
-means anything. A project configures what runs inside it:
+Rule: a project configures the data the phase machine reads. It never
+configures the machine. Every item below is data; every fixed item
+names the factor or fix it protects.
 
-- the gate ladder, its order, and its commands
-- which review roles green requires, including new ones
-- the sandbox adapter and image
-- `red: "waived"` for a task with no behaviour to test, such as a
-  docs-only change. The task must carry a reason, the run records
-  the waiver, and the manifest shows it. The default is `required`.
+A project can set:
 
-A project cannot remove replay, the re-hash at green, the review
-void on re-stage, or the uncertain-delivery block.
+- the gate ladder: which checks run, their commands, their order
+- its own roles, each mapped to a kind, with any number of review
+  roles and the set green requires
+- prompts and skills per role, from `.t12/` before the factory's
+- whether a task may waive red, with a reason the manifest shows
+- whether the QA lane runs
+- pause points where a human must resume, such as before green or
+  before delivery (Factor 6 and 7)
+- budgets, sandbox, `verify_deps`, protected and security-review
+  paths, `touches` and `depends_on`
+- intake and delivery adapters
+- how often a pattern must recur before `retro` reports it
+
+A project cannot change:
+
+- the phase order: red, stage, gates, replay, review, green. The
+  state machine is the only control flow (Factor 8).
+- one JSON tool call per worker, with a fixed tool set per kind, so
+  every tool maps to a step the core checks (Factor 4)
+- one session per role (Factor 10)
+- that the profile comes from trunk and is frozen at
+  `prepare`, and that a change to `.t12/` needs a security review.
+  This is "the candidate never checks itself" for project settings.
+- that `touches` is enforced at `stage`; without it the queue's
+  no-overlap promise is a claim
+- that the core never calls a model or the network and never merges;
+  `retro` and `calibrate` propose, a human applies
 
 ## Plan
 
 Each step is one PR on top of the last. Each ends in a check that
 runs against a disposable repo, as the current tests do.
 
-1. **Project profile.** Read and freeze `.t12/project.json` from
-   base. Task overrides on top. Protected-path check at `stage`.
-   `t12 init --scaffold` writes a starter profile. The check is a
-   test where the builder edits `.t12/project.json` and a protected
-   path, and the run uses the base profile and refuses the stage.
-2. **Roles and skills.** Role-to-kind map, `TOOLS` keyed by kind,
+1. **Project profile. Built.** `.t12/project.json` replaces
+   `.t12/policy.json`. Read from the configured trunk, merged under
+   tighten-only rules, protected paths refused at `stage`.
+2. **Roles and skills. Built.** Role-to-kind map, `TOOLS` keyed by kind,
    layered prompt and skill resolution, hashes in the context. The
    check is a project-defined `ux-copy` review role that blocks
    green until it approves.
@@ -174,9 +204,13 @@ runs against a disposable repo, as the current tests do.
    `ADAPTERS`. GitLab and Bitbucket adapters, tested against fake
    HTTP servers with the existing outcome rules (a failed read is
    uncertain, never denied).
-4. **Intake adapters.** `t12 intake`, then a `source` ref carried
-   from the issue to the change request. GitHub issues and GitLab
-   issues first.
+4. **Intake adapters. Built.** Not `t12 intake`: intake adapters are
+   programs (`adapters/github-issues.py`, `adapters/gitlab-issues.py`)
+   that write task files into the queue directory, so the core stays
+   off the network. The profile's `intake` key sets their defaults,
+   and `source` goes from the issue into the run record and the
+   change-request body. The GitHub delivery adapter links it; the
+   GitLab and Bitbucket ones link it when step 3 lands.
 5. **Onboard chat-bridge.** Write its `.t12/project.json` from
    `chat-bridge/factory/paths.py` and its gate ladder. Run one real
    issue end to end. Then retire `chat-bridge/factory/` in a

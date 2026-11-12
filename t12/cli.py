@@ -13,11 +13,11 @@ import sys
 import time
 
 from . import delivery as delivery_mod
-from . import evidence, gates as gate_mod, gitio, limits, model, retro, runner, sandbox, store, tools
+from . import evidence, gates as gate_mod, gitio, instructions, limits, model, retro, runner, sandbox, store, tools
+from . import profile as profile_mod
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
-ROLES = ("test-writer", "builder", "reviewer", "qa", "security")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -105,6 +105,10 @@ def _link_deps(run, wt, checkout):
             raise StateError(f"declared dependency {dep} is tracked in the commit; "
                              "verify_deps must name untracked paths")
         os.makedirs(os.path.dirname(target), exist_ok=True)
+        expected = os.path.join(os.path.realpath(checkout), os.path.dirname(os.path.normpath(dep)))
+        if os.path.realpath(os.path.dirname(target)) != os.path.normpath(expected):
+            raise StateError(f"declared dependency {dep} sits under a symlink in the commit; "
+                             "verify_deps must name plain paths")
         real.append(os.path.realpath(source))
         os.symlink(real[-1], target)
     return real
@@ -232,15 +236,22 @@ def cmd_init(args):
     for sub in ("", "runs", "evidence", "worktrees"):
         store.mkdir_private(os.path.join(home, sub))
     config_path = os.path.join(home, "config.json")
-    config = {"version": model.VERSION, "repo": repo, "created_at": time.time()}
+    gitio.rev_parse(repo, f"refs/heads/{args.trunk}")
+    config = {"version": model.VERSION, "repo": repo, "trunk": args.trunk,
+              "created_at": time.time()}
     if os.path.exists(config_path):
         existing = store.load_json(config_path)
         if existing.get("repo") != repo:
             raise StateError(
                 f"state home already bound to {existing.get('repo')}, not {repo}"
             )
+        if "trunk" in existing and existing["trunk"] != args.trunk:
+            raise StateError(
+                f"state home already follows trunk {existing['trunk']!r}, "
+                f"not {args.trunk!r}; use a new state home to change it"
+            )
     store.save_json(config_path, config)
-    print(f"init: repo={repo} home={home}")
+    print(f"init: repo={repo} trunk={args.trunk} home={home}")
     return 0
 
 
@@ -250,14 +261,28 @@ def cmd_prepare(args):
     task = store.load_json(args.task)
     task_id = task.get("id")
     with model.run_lock(home, task_id):
-        return _admit(home, config["repo"], task, task_id, args.supersede)
+        return _admit(home, config["repo"], config.get("trunk", "main"), task, task_id,
+                      args.supersede)
 
 
-def _admit(home, repo, task, task_id, supersede):
+def _admit(home, repo, trunk, task, task_id, supersede):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
     base_commit = gitio.rev_parse(repo, base)
+    # The rules come from the trunk the state home names, never from the
+    # task's base: a task file could point base at a commit, or another
+    # run's branch, whose profile is weaker or missing.
+    trunk_commit = gitio.rev_parse(repo, f"refs/heads/{trunk}")
+    if not gitio.git_ok_bool(repo, "merge-base", trunk_commit, base_commit):
+        raise StateError(f"base {base!r} shares no history with trunk {trunk!r}")
+    if gitio.file_at(repo, trunk_commit, profile_mod.LEGACY_PATH) is not None:
+        raise StateError(f"{profile_mod.LEGACY_PATH} is no longer read; move its "
+                         f"security_review_paths into {profile_mod.PATH} on {trunk}")
+    profile = profile_mod.parse(gitio.file_at(repo, trunk_commit, profile_mod.PATH))
+    task = profile_mod.apply(profile, task)
+    for role in profile["roles"]:
+        instructions.resolve(repo, trunk_commit, profile["roles"], role, PROJECT_ROOT)
     for gate in task.get("gates", []):
         try:
             sandbox.check_command(gate.get("command") or [])
@@ -285,10 +310,14 @@ def _admit(home, repo, task, task_id, supersede):
             gitio.delete_branch(repo, old["branch"])
     calibrated = limits.load_limits(home)
     adapter, image = sandbox.resolve_adapter(task)
-    run = model.new_run(task, repo, home, base_commit, supersedes=supersedes,
+    run = model.new_run(task, repo, home, base_commit, profile["roles"], supersedes=supersedes,
                         defaults=calibrated,
                         defaults_source="calibrated" if calibrated else "builtin",
                         sandbox_adapter=adapter, sandbox_image=image)
+    for key in profile_mod.SCOPE_KEYS:
+        run[key] = profile[key]
+    run["trunk"] = trunk
+    run["trunk_commit"] = trunk_commit
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
@@ -317,17 +346,13 @@ def _admit(home, repo, task, task_id, supersede):
 def cmd_context(args):
     home = _home(args)
     run = _run(home, args.task_id)
-    if args.role not in ROLES:
-        raise StateError(f"unknown role {args.role!r}; roles are {list(ROLES)}")
-    prompt_path = os.path.join(PROJECT_ROOT, "prompts", f"{args.role}.md")
-    if not os.path.exists(prompt_path):
-        raise StateError(f"owned prompt missing: {prompt_path}")
-    with open(prompt_path, encoding="utf-8") as fh:
-        prompt = fh.read()
+    kind = model.role_kind(run, args.role)
+    used = instructions.resolve(run["repo"], run["trunk_commit"], run["role_map"],
+                                args.role, PROJECT_ROOT)
     wt = run["worktree"]
     changed = gitio.dirty_paths(wt) if os.path.isdir(wt) else []
     prior_review = None
-    if args.role in model.REVIEW_ROLES:
+    if kind == "review":
         for review in reversed(run.get("reviews") or []):
             if review["role"] == args.role:
                 prior_review = {
@@ -347,6 +372,7 @@ def cmd_context(args):
         "worktree": wt,
         "base": run["base"],
         "touches": run.get("touches"),
+        "protected_paths": run.get("protected_paths", []),
         "budgets": {
             "time_left_s": int(model.time_left_s(run)),
             "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
@@ -361,9 +387,14 @@ def cmd_context(args):
             {"question": e["question"], "answer": e["answer"]}
             for e in run.get("escalations") or [] if e["answer"] is not None
         ],
-        "tools": tools.schema_for(args.role),
+        "tools": tools.schema_for(kind),
+        "instructions": [{k: entry[k] for k in ("source", "path", "sha256")} for entry in used],
     }
-    print(prompt)
+    prompt, *skills = used
+    print(prompt["text"])
+    for skill in skills:
+        print(f"--- skill: {skill['path']} ({skill['source']}) ---")
+        print(skill["text"])
     print("--- context (JSON) ---")
     print(json.dumps(context, indent=2, sort_keys=True))
     return 0
@@ -376,7 +407,7 @@ def cmd_red(args):
         raise StateError(f"red requires phase 'ready', run is {run['phase']!r}")
     model.check_budgets(run)
     _require_probes(run)
-    model.check_session(run, "test-writer", args.session)
+    model.check_session(run, args.role, args.session)
     wt = _check_worktree(run)
     test_path = args.test_path
     if not os.path.exists(os.path.join(wt, test_path)):
@@ -425,7 +456,7 @@ def cmd_red(args):
         "test_blob": gitio.blob_at(wt, commit, test_path),
         "commit": commit,
     }
-    model.bind_session(run, "test-writer", args.session)
+    model.bind_session(run, args.role, args.session)
     model.transition(run, "red")
     _save(home, run, "red", {"commit": commit, "test_path": test_path})
     print(f"red: commit={commit[:12]} test={test_path}")
@@ -438,7 +469,7 @@ def cmd_stage(args):
     if run["phase"] not in ("red", "gates", "green"):
         raise StateError(f"stage requires phase 'red', 'gates' or 'green', run is {run['phase']!r}")
     model.check_budgets(run)
-    model.check_session(run, "builder", args.session)
+    model.check_session(run, args.role, args.session)
     wt = _check_worktree(run)
     if not gitio.is_clean(wt):
         raise StateError("refusing stage: worktree has uncommitted changes")
@@ -450,13 +481,24 @@ def cmd_stage(args):
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
     sensitive = []
+    if run.get("base_commit") and "trunk_commit" not in run:
+        raise StateError("refusing stage: this run was prepared before project profiles; "
+                         "stop it and prepare it again with --supersede")
     if run.get("base_commit"):
         changed = gitio.changed_paths(wt, run["base_commit"], candidate)
         outside = model.outside_touches(run, changed)
         if outside:
             raise StateError("refusing stage: the candidate changes paths outside the "
                              f"task's touches: {', '.join(outside)}")
-        roots = model.security_paths(gitio.file_at(wt, run["base_commit"], model.POLICY_PATH))
+        # Measured from where the candidate leaves trunk, so a base that
+        # already carries an unreviewed edit cannot hide it.
+        fork = gitio.merge_base(wt, run["trunk_commit"], candidate)
+        changed = sorted(set(changed) | set(gitio.changed_paths(wt, fork, candidate)))
+        protected = [p for p in changed if model.under(p, run["protected_paths"])]
+        if protected:
+            raise StateError("refusing stage: the candidate changes protected paths: "
+                             f"{', '.join(protected)}")
+        roots = profile_mod.security_roots(run)
         sensitive = [p for p in changed if model.under(p, roots)]
         if sensitive and "security" not in run["required_reviews"]:
             run["required_reviews"].append("security")
@@ -466,7 +508,7 @@ def cmd_stage(args):
         model.void_reviews(run, f"superseded by {candidate[:12]}")
     run["candidate"] = {"commit": candidate, "staged_at": time.time()}
     model.bump_op(run)
-    model.bind_session(run, "builder", args.session)
+    model.bind_session(run, args.role, args.session)
     model.transition(run, "gates")
     _save(home, run, "staged", {"commit": candidate, "security_paths": sensitive})
     print(f"staged: candidate={candidate[:12]}")
@@ -480,13 +522,17 @@ def cmd_gate(args):
         raise StateError(f"gate requires phase 'gates', run is {run['phase']!r}")
     model.check_budgets(run)
     _require_probes(run)
-    model.check_session(run, "qa", args.session)
+    if model.role_kind(run, args.role) != "qa":
+        raise StateError(f"gates run under a qa-kind role; {args.role!r} is not one")
+    model.check_session(run, args.role, args.session)
     wt = _check_candidate_tree(run, "gate")
     gate = gate_mod.find_gate(run, args.name)
     gate_mod.check_order(run, gate)
     obs = _run_on_commit(home, run, wt, run["candidate"]["commit"], gate["command"])
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
+    gate["run_by_role"] = args.role
+    model.bind_session(run, args.role, args.session)
     gate["commit"] = run["candidate"]["commit"]
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:
@@ -561,6 +607,9 @@ def cmd_review(args):
     home = _home(args)
     run = _run(home, args.task_id)
     role = args.role
+    kind = model.role_kind(run, role)
+    if kind != "review":
+        raise StateError(f"{role!r} is a {kind} role; only review roles record reviews")
     if run["phase"] not in ("gates", "green"):
         raise StateError(f"review requires phase 'gates' or 'green', run is {run['phase']!r}")
     if not gate_mod.all_passed(run):
@@ -1058,12 +1107,13 @@ def cmd_act(args):
     if run["phase"] in ("local-verified", "stopped", "paused"):
         raise StateError(f"run is {run['phase']}; no worker output is accepted")
     model.check_budgets(run)
+    kind = model.role_kind(run, args.role)
     with open(args.input, "rb") as fh:
         data = fh.read()
     seq = len(model.read_events(home, run["task_id"])) + 1
     ref = evidence.write_evidence(home, run["task_id"], f"worker-output-{seq}.json", data)
     try:
-        tool, targs = tools.parse(data.decode("utf-8", "replace"), args.role)
+        tool, targs = tools.parse(data.decode("utf-8", "replace"), kind)
         model.check_session(run, args.role, args.session)
     except StateError as exc:
         model.bump_op(run)
@@ -1071,9 +1121,9 @@ def cmd_act(args):
               {"role": args.role, "output": ref, "error": str(exc)})
         raise
     if tool == "qa_report":
-        model.bind_session(run, "qa", args.session)
+        model.bind_session(run, args.role, args.session)
     _save(home, run, "worker-output", {"role": args.role, "tool": tool, "output": ref})
-    step = dict(home=args.home, task_id=args.task_id, session=args.session)
+    step = dict(home=args.home, task_id=args.task_id, session=args.session, role=args.role)
     if tool == "red_test_ready":
         return cmd_red(argparse.Namespace(
             **step, test_path=targs["test_path"],
@@ -1082,8 +1132,7 @@ def cmd_act(args):
         return cmd_stage(argparse.Namespace(**step))
     if tool == "review":
         verdict = "approve" if targs["verdict"] == "merge-ready" else "changes-requested"
-        return cmd_review(argparse.Namespace(
-            **step, role=args.role, verdict=verdict, report=args.input))
+        return cmd_review(argparse.Namespace(**step, verdict=verdict, report=args.input))
     if tool == "escalate":
         return cmd_escalate(argparse.Namespace(
             home=args.home, task_id=args.task_id, question=targs["question"]))
@@ -1099,6 +1148,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init"); p.add_argument("--repo", required=True); p.add_argument("--home", required=True)
+    p.add_argument("--trunk", default="main", help="branch whose .t12/project.json every run follows")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("prepare"); p.add_argument("--home", required=True); p.add_argument("--task", required=True)
@@ -1114,23 +1164,24 @@ def build_parser():
     p.add_argument("--test-path", required=True); p.add_argument("--command", required=True)
     p.add_argument("--marker", required=True); p.add_argument("--session", required=True,
                    help="test-writer session id (must differ from every other role's session)")
-    p.set_defaults(func=cmd_red)
+    p.set_defaults(func=cmd_red, role="test-writer")
 
     p = sub.add_parser("stage"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--session", required=True,
                    help="builder session id (must differ from the test-writer session)")
-    p.set_defaults(func=cmd_stage)
+    p.set_defaults(func=cmd_stage, role="builder")
 
     p = sub.add_parser("gate"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.add_argument("--name", required=True); p.add_argument("--session", required=True,
                    help="QA session id (must differ from the builder session)")
+    p.add_argument("--role", default="qa", help="a qa-kind role from the run (default qa)")
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("replay"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
     p.set_defaults(func=cmd_replay)
 
     p = sub.add_parser("review"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
-    p.add_argument("--role", required=True, choices=list(model.REVIEW_ROLES))
+    p.add_argument("--role", required=True, help="a review role of the run")
     p.add_argument("--session", required=True,
                    help="reviewer session id (must differ from every other role's session)")
     p.add_argument("--verdict", required=True, choices=["approve", "changes-requested"])
@@ -1196,7 +1247,7 @@ def build_parser():
     p.set_defaults(func=cmd_escalate)
 
     p = sub.add_parser("act"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
-    p.add_argument("--role", required=True, choices=list(model.SESSION_ROLES))
+    p.add_argument("--role", required=True, help="a role of the run")
     p.add_argument("--session", required=True, help="the host's id for the worker session that produced the output")
     p.add_argument("--input", required=True, help="the worker's JSON output (stored as evidence)")
     p.set_defaults(func=cmd_act)

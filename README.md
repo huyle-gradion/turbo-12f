@@ -35,6 +35,7 @@ bin/t12 red --home /path/to/state-home --task-id demo-1 \
   --marker "FAILED"
 
 # 4. Ask the builder to implement, then pin the candidate
+#    (see "Caging the builder" to run it away from .git and the state home)
 bin/t12 context --home /path/to/state-home --task-id demo-1 \
   --role builder --phase implement
 bin/t12 stage --home /path/to/state-home --task-id demo-1
@@ -53,6 +54,15 @@ stage, gate, review); one session serves exactly one role per run,
 so the test-writer cannot stage and the builder cannot review. A
 task lists the reviews green requires in `required_reviews`
 (default `["reviewer"]`; add `"security"` when it matters).
+
+Roles are names; each maps to one of four kinds, which fix the tools
+it may call: `test-writer` (`red_test_ready`), `builder`
+(`implementation_ready`), `qa` (`qa_report`) and `review` (`review`).
+Every kind may call `escalate`. The built-in roles are test-writer,
+builder, qa, and reviewer and security (both `review`). A project
+adds its own roles in its profile (see below); `prepare` freezes the
+run's roles, and `act`, `review` and `context` refuse a role the run
+does not have.
 
 ## Delivery
 
@@ -93,12 +103,12 @@ merge — a human merges.
 |---|---|
 | `init` | Bind a repo + state home, create the directory layout |
 | `prepare` | Admit a task: validate repo/base/branch/gates, create worktree + run record (`--supersede` archives a stopped run and starts fresh) |
-| `context` | Print the owned prompt + minimal context for a role (Factor 2/3/9) |
+| `context` | Print the role's prompt and skills + minimal context (Factor 2/3/9); the JSON's `instructions` lists the source, path and SHA-256 of each file used |
 | `red` | Run the test command, expect failure + marker, commit the test, record red evidence |
 | `stage` | Pin the candidate commit; verify ancestry, clean tree, unchanged test blob |
-| `gate` | Run one gate in order; failure counts against the repair cap |
+| `gate` | Run one gate in order; failure counts against the repair cap (`--role` names a qa-kind role, default `qa`) |
 | `replay` | Re-run the exact red command on the candidate; expect success |
-| `review` | Record a reviewer/security review: `--role reviewer\|security --session S --verdict approve\|changes-requested --report FILE` |
+| `review` | Record a review by any review role of the run: `--role R --session S --verdict approve\|changes-requested --report FILE` |
 | `green` | Re-hash and re-validate all evidence; requires replay + approving reviews; certify `local-verified` |
 | `manifest` | Write the manifest (recorded as an event with its SHA-256) |
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
@@ -161,6 +171,127 @@ state home if `t12 calibrate --apply` has written one, else the
 built-ins (3600s / 100 ops / 3 repairs). The run records which
 source applied (`budget_source`).
 
+## Project profile
+
+A project keeps what its tasks share in `.t12/project.json`, so a task
+file only says what is unique to it:
+
+```json
+{
+  "version": 1,
+  "name": "my-product",
+  "gates": [{"name": "unit", "command": ["python3", "-m", "pytest", "-q"]}],
+  "required_reviews": ["reviewer"],
+  "sandbox_adapter": "docker",
+  "sandbox_image": "my-product-verify:1",
+  "verify_deps": [".venv"],
+  "protected_paths": ["guards", "e2e"],
+  "security_review_paths": ["src/auth"],
+  "roles": {
+    "builder": {"skills": ["plain-ui-copy"]},
+    "ux-copy": {"kind": "review", "prompt": "ux-copy.md"}
+  },
+  "intake": {"adapter": "github-issues", "repo": "owner/my-product", "label": "factory"}
+}
+```
+
+`prepare` reads the profile from the trunk branch the state home names
+(`t12 init --trunk`, default `main`; a tag of the same name does not
+count, and a state home cannot switch trunks), never from the task's
+`base` or
+the worktree, and stores the merged task in the run. A task cannot
+pick an older commit or another run's branch to get weaker rules, and
+a candidate that edits the profile changes nothing for its own run.
+Unknown keys are refused. A leftover `.t12/policy.json` on trunk stops
+`prepare` until its `security_review_paths` move into the profile.
+
+A task may tighten the profile but never loosen it, because task files
+may come from an issue tracker:
+
+| Key | When both the profile and the task set it |
+|---|---|
+| `gates` | The profile's gates run first, then the task's |
+| `required_reviews` | Both lists apply |
+| `require_probes` | On if either turns it on |
+| `sandbox_adapter`, `sandbox_image` | Refused unless equal |
+| `verify_deps` | The task may only narrow the profile's list; a profile without one allows none |
+| budgets | The task wins |
+| `protected_paths`, `security_review_paths`, `roles`, `intake` | Profile only; a task may not set them |
+
+`stage` refuses a candidate that changes a protected path, measured
+from both the task's base and the point where the candidate leaves
+trunk, so a base carrying another run's unreviewed edit cannot hide
+it. A move out of a protected path counts as a change to it. A
+`verify_deps` entry may not overlap a protected path or sit in the
+folder of a protected file, and a dep reached through a symlink the
+candidate commits is refused at the gate. A base with no history in
+common with trunk is refused at `prepare`. Deps still come
+from the builder's worktree, so a builder can put code in `.venv` or
+`node_modules` that a gate runs; the profile does not close that.
+
+`roles` maps a role name to `{"kind", "prompt", "skills"}`. The
+built-in roles are always present; a project may add roles and give
+any role a prompt or skills, but may not change a built-in's kind.
+`required_reviews` must name review roles. With the profile above,
+green waits for an approving `ux-copy` review as well as the
+reviewer's.
+
+`intake` says where tasks come from; only an intake adapter reads it
+(see "Taking tasks from an issue tracker"). `prepare` validates it.
+
+`context --role R` reads R's instructions in layers. The prompt is
+`.t12/prompts/<prompt>` on the trunk commit when the role names one,
+else the factory's `prompts/<role>.md` for a built-in role, or the
+prompt of the first built-in role of its kind for a project role
+(`prompts/reviewer.md` for `ux-copy`). Each skill is
+`.t12/skills/<name>/SKILL.md` on the trunk commit, else the factory's
+`skills/<name>/SKILL.md`; a skill found in neither is refused at
+`prepare` and `context`. A worktree edit to `.t12/` changes none of
+this for the running task.
+
+## Taking tasks from an issue tracker
+
+A task file need not be hand-written. An intake adapter turns issues
+with a label into task files in a queue directory:
+
+```bash
+export GITHUB_TOKEN=...
+python3 adapters/github-issues.py intake --repo-config path/to/.t12/project.json \
+  --out-dir queue --home /path/to/state-home
+bin/t12-queue --home /path/to/state-home --queue queue --max 3
+```
+
+The issue needs an "Acceptance criteria" heading with a `- ` list; an
+issue without one is skipped with the reason printed. The task file
+holds only `id` (`gh-<number>`), `title`, `acceptance_criteria`,
+optional `touches` and `depends_on`, and
+`source: {"adapter", "ref", "url"}`. Gates, reviews, sandbox and
+everything else the profile controls never come from an issue, and
+re-running intake changes nothing that is unchanged or already has a
+run. An issue whose body contains an HTML comment is skipped, because
+the forge hides comment text from the maintainer who applies the
+label and intake cannot match every forge's rules for what is hidden.
+When an issue
+loses its label or closes, the next intake run deletes its queued
+task file, unless the task already has a run. GitLab works the same
+through `adapters/gitlab-issues.py`. The formats and failure rules
+are in `adapters/README.md`; the core never touches the network or
+holds a token.
+
+Two limits remain. The issue author can edit the body after the
+label is applied, and the next intake run picks up the edit: the
+label approves the author, not one version of the text. And if
+writing a task file fails partway through a run, the queue can hold
+some of that run's tasks and not others; run intake again once the
+cause is fixed.
+
+`prepare` records `source` in the run record. The GitHub delivery
+adapter then puts the source link in the pull request body, with
+`Closes #N` when the issue is in the same repo, so merging closes it.
+The title and criteria appear in the body inside a code block with
+issue references broken, so an issue author cannot close other
+issues or hide part of the body.
+
 ## Running several tasks at once
 
 Separate runs share one state home and proceed in parallel. Each
@@ -193,8 +324,10 @@ that run as merged: tasks that depend on it, or overlap it, wait. Use
 merge commits for factory branches.
 
 Runs prepared before `touches` existed carry no `base_commit`, so
-`stage` skips the `touches` and policy checks for them. Finish or
-supersede them before relying on either.
+`stage` skips the `touches` and profile checks for them. Finish or
+supersede them before relying on either. Runs prepared after `touches`
+but before project profiles are refused at `stage`, and runs prepared
+before named roles are refused at every role step; supersede them.
 
 ## Improving the factory
 
@@ -217,12 +350,12 @@ a task aimed at turbo-12f. Two rules keep that safe:
   installed copy of `main` (or the `turbo-12f` image through
   `bin/t12-container`), never from a worktree. `t12` refuses to run
   when its own code sits inside the state home it is given.
-- **Policy changes need a security review.** A product repo may list
-  paths in `.t12/policy.json` as `"security_review_paths"`. `stage`
-  reads that file from the run's base commit, not the candidate, and
+- **Profile changes need a security review.** A product repo may list
+  paths in `.t12/project.json` as `"security_review_paths"`. `stage`
+  reads the profile from the trunk commit, not the candidate, and
   adds `security` to `required_reviews` when the candidate changes a
-  listed path or the policy file itself. turbo-12f lists its state
-  machine, sandbox, evidence and storage code, and its prompts.
+  listed path or anything under `.t12/`. turbo-12f lists its state
+  machine, profile, sandbox, evidence and storage code, and its prompts.
 
 The factory still stops at `local-verified`. A human merges.
 
@@ -260,6 +393,67 @@ the host. The `docker` sandbox adapter is not available inside the
 container, and a task that requests it is refused at `prepare`.
 Reaching Docker from inside would mean mounting the Docker socket,
 which gives the container root on the host.
+
+## Caging the builder
+
+`bin/t12-cage` runs the builder's command in a Landlock cage, so a
+builder cannot tamper with what the factory later trusts:
+
+```sh
+bin/t12-cage --home /path/to/state-home --task-id demo-1 -- <builder command...>
+bin/t12-cage commit --home /path/to/state-home --task-id demo-1 \
+  --message "feat: implement demo"
+bin/t12 stage --home /path/to/state-home --task-id demo-1
+```
+
+Inside the cage the command starts in the run's worktree and can
+write only the worktree and a private temp dir (`TMPDIR`, removed on
+exit). It can read the system directories and the shared `.git`, so
+`git status`, `git diff`, and `git log` work. It cannot write the
+shared `.git` (hooks, config, `refs/replace`, `info/attributes`) or
+the state home, and it cannot open TCP connections. UDP stays open,
+so the cage does not stop data from leaving. Git inside the cage
+reads no global config, and the `XDG_*_HOME` directories point into
+the private temp dir, because your own are not readable there.
+
+The command runs in its own PID namespace. No process it started
+outlives `t12-cage`, including one that detached with a double fork
+and `setsid`: the kernel kills them all when `t12-cage` returns, when
+`SIGINT`, `SIGTERM`, or `SIGHUP` stops it, and when it is killed with
+`SIGKILL`. After a `SIGKILL` they die a moment later, and the private
+temp dir stays behind. The command cannot signal or limit a process
+outside the namespace. Tools that read `/proc`, such as `ps`, still
+list the host's processes there, under pids that mean nothing inside
+the cage.
+
+The cage needs Linux with Landlock ABI 5 or later (kernel 6.10) and
+unprivileged user namespaces, which a PID namespace requires. Some
+hosts turn those off (`kernel.unprivileged_userns_clone=0`,
+`user.max_user_namespaces=0`, Ubuntu's
+`kernel.apparmor_restrict_unprivileged_userns=1`, Docker's default
+seccomp profile). When either is missing, `t12-cage` exits non-zero
+and does not run the command. The user namespace maps only your own
+uid and gid, so files owned by anyone else show as `nobody`. Inside
+another Landlock cage that makes `/proc` read-only, as in this repo's
+own gates, `t12-cage` cannot write that map. It says so on stderr and
+the command then sees uid 65534 for itself and for every file. File
+access is the same either way.
+
+| Option | Effect |
+|---|---|
+| `--read PATH` | Also let the command read PATH (repeatable). An agent CLI installed under your home directory needs this. |
+| `--write DIR` | Also let the command write DIR (repeatable). Refused when DIR overlaps the shared `.git` or the state home. |
+| `--network` | Allow TCP, for a builder that calls a model. UDP is open either way. |
+
+A linked worktree keeps its index and refs in the shared `.git`, so
+a caged builder cannot commit. Run `t12-cage commit` yourself,
+outside the cage, after `t12-cage` ends. It commits every change in
+the worktree on the run's branch. It refuses when the worktree's
+`.git` pointer file is not the one `prepare` wrote, or when the
+worktree contains a nested git repository. It passes git the git dir
+`prepare` created and runs no hooks. When it refuses, stop the run:
+`t12` commands do not make these checks themselves. CONTEXT.md lists
+what the cage leaves open.
 
 ## Tests
 

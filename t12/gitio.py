@@ -17,14 +17,14 @@ def git(repo, *args, timeout=_TIMEOUT, env=None):
     return obs
 
 
-def git_ok(repo, *args, timeout=_TIMEOUT, env=None):
+def git_ok(repo, *args, timeout=_TIMEOUT, env=None, strip=True):
     obs = git(repo, *args, timeout=timeout, env=env)
     if obs["timed_out"] or obs["exit_code"] != 0:
         raise GitError(
             f"git {' '.join(args)} failed (exit={obs['exit_code']}, "
             f"timed_out={obs['timed_out']}): {(obs['stderr'] or obs['stdout']).strip()[:500]}"
         )
-    return obs["stdout"].strip()
+    return obs["stdout"].strip() if strip else obs["stdout"]
 
 
 def is_git_repo(path):
@@ -55,11 +55,19 @@ def is_clean(repo):
 
 
 def dirty_paths(repo):
-    out = git_ok(repo, "status", "--porcelain", "--untracked-files=all")
+    """Every changed, staged, or untracked path, exactly as git names
+    it. A rename lists both its new and its old path."""
+    obs = git(repo, "status", "--porcelain", "-z", "--untracked-files=all")
+    if obs["timed_out"] or obs["exit_code"] != 0:
+        raise GitError(f"git status failed in {repo}: {obs['stderr'].strip()[:500]}")
+    entries = obs["stdout"].split("\0")
     paths = []
-    for line in out.splitlines():
-        if len(line) > 3:
-            paths.append(line[3:].strip().strip('"'))
+    while entries:
+        entry = entries.pop(0)
+        if len(entry) > 3:
+            paths.append(entry[3:])
+            if entry[0] in "RC" and entries:
+                paths.append(entries.pop(0))
     return paths
 
 
@@ -70,6 +78,15 @@ def blob_hash(repo, rel_path):
 def is_ancestor(repo, ancestor, descendant):
     obs = git(repo, "merge-base", "--is-ancestor", ancestor, descendant)
     return obs["exit_code"] == 0 and not obs["timed_out"]
+
+
+def git_ok_bool(repo, *args):
+    obs = git(repo, *args)
+    return obs["exit_code"] == 0 and not obs["timed_out"]
+
+
+def merge_base(repo, a, b):
+    return git_ok(repo, "merge-base", a, b)
 
 
 def changed_paths(repo, a, b):
@@ -133,10 +150,15 @@ def commit_with_path(repo, rel_path, message):
 
 
 def file_at(repo, commit, rel_path):
-    """The file's text at `commit`, or None when the commit lacks it."""
-    if git(repo, "cat-file", "-e", f"{commit}:{rel_path}")["exit_code"] != 0:
+    """The file's text at `commit`, or None when the commit lacks it.
+    A folder at the path is an error, not an absence: reading the
+    profile as missing would drop every rule in it."""
+    obs = git(repo, "cat-file", "-t", f"{commit}:{rel_path}")
+    if obs["exit_code"] != 0:
         return None
-    return git_ok(repo, "show", f"{commit}:{rel_path}")
+    if obs["stdout"].strip() != "blob":
+        raise GitError(f"{rel_path} at {commit[:12]} is a {obs['stdout'].strip()}, not a file")
+    return git_ok(repo, "show", f"{commit}:{rel_path}", strip=False)
 
 
 def blob_at(repo, commit, rel_path):
