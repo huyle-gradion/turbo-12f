@@ -14,6 +14,7 @@ import time
 
 from . import delivery as delivery_mod
 from . import evidence, gates as gate_mod, gitio, limits, model, retro, runner, sandbox, store, tools
+from . import profile as profile_mod
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -258,6 +259,8 @@ def _admit(home, repo, task, task_id, supersede):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
     base_commit = gitio.rev_parse(repo, base)
+    profile = profile_mod.parse(gitio.file_at(repo, base_commit, profile_mod.PATH))
+    task = profile_mod.apply(profile, task)
     for gate in task.get("gates", []):
         try:
             sandbox.check_command(gate.get("command") or [])
@@ -289,6 +292,8 @@ def _admit(home, repo, task, task_id, supersede):
                         defaults=calibrated,
                         defaults_source="calibrated" if calibrated else "builtin",
                         sandbox_adapter=adapter, sandbox_image=image)
+    for key in profile_mod.SCOPE_KEYS:
+        run[key] = profile[key]
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
@@ -347,6 +352,7 @@ def cmd_context(args):
         "worktree": wt,
         "base": run["base"],
         "touches": run.get("touches"),
+        "protected_paths": run.get("protected_paths", []),
         "budgets": {
             "time_left_s": int(model.time_left_s(run)),
             "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
@@ -450,13 +456,20 @@ def cmd_stage(args):
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
     sensitive = []
+    if run.get("base_commit") and "protected_paths" not in run:
+        raise StateError("refusing stage: this run was prepared before project profiles; "
+                         "stop it and prepare it again with --supersede")
     if run.get("base_commit"):
         changed = gitio.changed_paths(wt, run["base_commit"], candidate)
         outside = model.outside_touches(run, changed)
         if outside:
             raise StateError("refusing stage: the candidate changes paths outside the "
                              f"task's touches: {', '.join(outside)}")
-        roots = model.security_paths(gitio.file_at(wt, run["base_commit"], model.POLICY_PATH))
+        protected = [p for p in changed if model.under(p, run["protected_paths"])]
+        if protected:
+            raise StateError("refusing stage: the candidate changes protected paths: "
+                             f"{', '.join(protected)}")
+        roots = profile_mod.security_roots(run)
         sensitive = [p for p in changed if model.under(p, roots)]
         if sensitive and "security" not in run["required_reviews"]:
             run["required_reviews"].append("security")

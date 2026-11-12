@@ -13,7 +13,7 @@ import tempfile
 import time
 import unittest
 
-from t12 import model, store
+from t12 import model, profile, store
 from t12.errors import BudgetError, StateError
 
 # The spec: allowed targets per phase. A transition to the phase
@@ -183,18 +183,49 @@ class ArchiveTest(unittest.TestCase):
 
 
 
-class PolicyTest(unittest.TestCase):
-    def test_adding_or_editing_a_policy_needs_a_security_review(self):
-        for base_policy in (None, '{"security_review_paths": ["src/auth"]}'):
-            roots = model.security_paths(base_policy)
-            self.assertTrue(model.under(".t12/policy.json", roots), base_policy)
-            self.assertFalse(model.under("src/other.py", roots), base_policy)
+class ProfileTest(unittest.TestCase):
+    GATE = {"name": "unit", "command": ["python3", "-m", "unittest"]}
+
+    def profile(self, **fields):
+        return profile.parse(json.dumps(dict({"version": 1}, **fields)))
+
+    def test_editing_or_adding_a_profile_needs_a_security_review(self):
+        for base in (profile.parse(None), self.profile(security_review_paths=["src/auth"])):
+            roots = profile.security_roots(base)
+            self.assertTrue(model.under(".t12/project.json", roots))
+            self.assertFalse(model.under("src/other.py", roots))
         self.assertTrue(model.under("src/auth/login.py", roots))
 
-    def test_a_malformed_policy_on_the_base_is_refused(self):
-        for text in ("[]", "not json", '{"security_review_paths": ["../x"]}'):
-            with self.assertRaises(StateError):
-                model.security_paths(text)
+    def test_a_malformed_profile_on_the_base_is_refused(self):
+        for text in ("[]", "not json", '{"version": 2}', '{"version": 1, "gatez": []}',
+                     '{"version": 1, "protected_paths": ["../x"]}',
+                     '{"version": 1, "op_limit": true}'):
+            with self.assertRaises(StateError, msg=text):
+                profile.parse(text)
+
+    def test_a_task_without_settings_takes_the_profile(self):
+        merged = profile.apply(self.profile(gates=[self.GATE], op_limit=9), {"id": "t"})
+        self.assertEqual(merged["gates"], [self.GATE])
+        self.assertEqual(merged["op_limit"], 9)
+
+    def test_a_task_can_tighten_but_never_loosen_the_profile(self):
+        base = self.profile(gates=[self.GATE], required_reviews=["reviewer"],
+                            sandbox_adapter="docker", require_probes=True)
+        extra = {"name": "lint", "command": ["ruff", "check"]}
+        merged = profile.apply(base, {"gates": [extra], "required_reviews": ["security"],
+                                      "require_probes": False})
+        self.assertEqual(merged["gates"], [self.GATE, extra])
+        self.assertEqual(merged["required_reviews"], ["reviewer", "security"])
+        self.assertTrue(merged["require_probes"])
+        for loosen in ({"sandbox_adapter": "none"}, {"gates": [self.GATE]},
+                       {"protected_paths": []}, {"security_review_paths": []}):
+            with self.assertRaises(StateError, msg=loosen):
+                profile.apply(base, loosen)
+
+    def test_the_task_sets_its_own_budget(self):
+        merged = profile.apply(self.profile(op_limit=9), {"op_limit": 40})
+        self.assertEqual(merged["op_limit"], 40)
+
 
 if __name__ == "__main__":
     unittest.main()
