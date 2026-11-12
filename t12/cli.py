@@ -356,11 +356,22 @@ def cmd_context(args):
     if kind == "review":
         for review in reversed(run.get("reviews") or []):
             if review["role"] == args.role:
+                # Refuse a prior report that no longer matches its hash,
+                # as verify would; then pass its findings, not its text.
+                evidence.verify_ref(home, run["task_id"], review["report"])
+                with open(review["report"]["path"], encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                try:
+                    findings = tools.parse(text, kind)[1].get("findings")
+                except StateError:
+                    findings = None
                 prior_review = {
                     "verdict": review["verdict"],
                     "commit": review["commit"],
                     "report": review["report"]["name"],
                     "voided": review["voided"],
+                    "voided_reason": review.get("voided_reason"),
+                    "findings": findings if isinstance(findings, list) else text[-4000:],
                 }
                 break
     elif kind == "builder":
