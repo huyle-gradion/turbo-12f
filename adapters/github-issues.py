@@ -3,7 +3,8 @@
 
 Usage:
     python3 adapters/github-issues.py intake --out-dir <queue dir> \
-        [--repo-config .t12/project.json] [--repo owner/name] [--label L] \
+        [--repo-config .t12/project.json | --trunk-repo PATH --trunk BRANCH] \
+        [--repo owner/name] [--label L] \
         [--home <state-home>] [--api-base https://api.github.com]
 
 Token from GITHUB_TOKEN. See adapters/README.md for the issue format and
