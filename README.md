@@ -270,20 +270,29 @@ write only the worktree and a private temp dir (`TMPDIR`, removed on
 exit). It can read the system directories and the shared `.git`, so
 `git status`, `git diff`, and `git log` work. It cannot write the
 shared `.git` (hooks, config, `refs/replace`, `info/attributes`) or
-the state home, it cannot open TCP connections, and git inside it
-reads no global config. The cage needs Linux with Landlock ABI 4 or
-later. When no cage can be applied, `t12-cage` exits non-zero and
-does not run the command.
+the state home, and it cannot open TCP connections. UDP stays open,
+so the cage does not stop data from leaving. Git inside the cage
+reads no global config, and the `XDG_*_HOME` directories point into
+the private temp dir, because your own are not readable there.
+
+`t12-cage` returns only after every process the command started is
+dead, including one that detached with a double fork and `setsid`.
+`SIGINT`, `SIGTERM`, and `SIGHUP` stop it the same way. `SIGKILL`
+does not: the command's processes keep running in the cage.
+
+The cage needs Linux with Landlock ABI 5 or later (kernel 6.10).
+When no cage can be applied, `t12-cage` exits non-zero and does not
+run the command.
 
 | Option | Effect |
 |---|---|
 | `--read PATH` | Also let the command read PATH (repeatable). An agent CLI installed under your home directory needs this. |
 | `--write DIR` | Also let the command write DIR (repeatable). Refused when DIR overlaps the shared `.git` or the state home. |
-| `--network` | Allow TCP, for a builder that calls a model. |
+| `--network` | Allow TCP, for a builder that calls a model. UDP is open either way. |
 
 A linked worktree keeps its index and refs in the shared `.git`, so
 a caged builder cannot commit. Run `t12-cage commit` yourself,
-outside the cage, after the builder exits. It commits every change in
+outside the cage, after `t12-cage` returns. It commits every change in
 the worktree on the run's branch. It refuses when the worktree's
 `.git` pointer file is not the one `prepare` wrote, or when the
 worktree contains a nested git repository. It passes git the git dir

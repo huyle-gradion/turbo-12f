@@ -12,19 +12,34 @@ file is writable from inside the cage, so `commit` never follows it.
 It finds the git dir `prepare` created from the shared `.git` side,
 refuses a pointer that names anything else, and passes that git dir
 to git explicitly.
+
+`run` returns only after every process the command started is dead,
+so nothing caged is left to rewrite that pointer after `commit` has
+checked it.
 """
 
 import argparse
+import contextlib
+import ctypes
 import os
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 from . import gitio, model, sandbox, store
 from .errors import StateError, T12Error
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PR_SET_CHILD_SUBREAPER = 36
+_STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+_XDG_DIRS = {
+    "XDG_CONFIG_HOME": "config",
+    "XDG_CACHE_HOME": "cache",
+    "XDG_DATA_HOME": "data",
+    "XDG_STATE_HOME": "state",
+}
 
 
 def _overlap(a, b):
@@ -109,13 +124,95 @@ def commit(home, task_id, message):
     return 0
 
 
+def _set_subreaper(enabled):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, int(enabled), 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "PR_SET_CHILD_SUBREAPER failed")
+
+
+def _children():
+    """This process's direct children. Killing them hands their own
+    children to this process, so repeated calls reach every descendant."""
+    try:
+        found = []
+        for tid in os.listdir("/proc/self/task"):
+            with open(f"/proc/self/task/{tid}/children", encoding="ascii") as fh:
+                found += [int(pid) for pid in fh.read().split()]
+        return found
+    except FileNotFoundError:
+        pass  # a kernel without CONFIG_PROC_CHILDREN, or a thread that just exited
+    me, found = os.getpid(), []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", encoding="utf-8", errors="replace") as fh:
+                # The command name is in parentheses and may hold spaces.
+                ppid = int(fh.read().rpartition(")")[2].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        if ppid == me:
+            found.append(int(name))
+    return found
+
+
+def _kill_descendants():
+    """Kill and reap every descendant. Returns only once this process
+    has no children, so a process that forks faster than one pass can
+    kill delays the return but never outlives it."""
+    while True:
+        children = _children()
+        for pid in children:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        try:
+            while os.waitpid(-1, os.WNOHANG)[0]:
+                pass
+        except ChildProcessError:
+            return
+        if not children:
+            time.sleep(0.001)
+
+
+def _raise_exit(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+@contextlib.contextmanager
+def _contained():
+    """Hold every process started inside the block to the block's
+    lifetime. A process that leaves its session (double fork, setsid)
+    is reparented to this one, not to init, and is killed on the way
+    out. Call from a process with no other children: they die too."""
+    try:
+        _set_subreaper(True)
+    except OSError as exc:
+        raise StateError(
+            f"refusing to start: cannot contain the command's processes: {exc}") from exc
+    previous = {}
+    try:
+        # A stop signal must run the kill below, not skip it.
+        for sig in _STOP_SIGNALS:
+            previous[sig] = signal.signal(sig, _raise_exit)
+        yield
+    finally:
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        _kill_descendants()
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        _set_subreaper(False)
+
+
 def run(home, task_id, argv, read=(), write=(), network=False):
     """Run argv in the cage and return its exit code. Raises before
-    the command starts when no cage can be applied."""
-    if not sandbox.landlock_available():
+    the command starts when no cage can be applied. When it returns,
+    no process argv started is alive."""
+    # The cage's ruleset names an access right that ABI 5 added.
+    if not sandbox.landlock_available() or sandbox.landlock_abi() < 5:
         raise StateError(
             "refusing to start: no cage can be applied on this host "
-            "(needs Linux Landlock, ABI 4 or later)")
+            "(needs Linux Landlock, ABI 5 or later)")
     run_record, common_dir = _load(home, task_id)
     worktree = os.path.realpath(run_record["worktree"])
     common_dir = os.path.realpath(common_dir)
@@ -132,25 +229,23 @@ def run(home, task_id, argv, read=(), write=(), network=False):
                     raise StateError(
                         f"refusing: writable path {path} overlaps {protected}, "
                         "which the cage protects")
-        try:
-            proc = subprocess.Popen(
-                argv, cwd=worktree,
-                # git dies on a global config it may not read, and the
-                # operator's home is not readable from inside the cage.
-                env=dict(os.environ, TMPDIR=tmp, GIT_CONFIG_GLOBAL="/dev/null"),
-                # A new session has no controlling terminal to push input into.
-                start_new_session=True,
-                preexec_fn=sandbox.builder_cage_preexec(
-                    [worktree, *extra], [common_dir, *read], network))
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise StateError(f"refusing to start: cannot cage {argv[0]}: {exc}") from exc
-        try:
-            return proc.wait()
-        finally:
+        # git dies on a config or exclude file it may not read, and the
+        # operator's home is not readable from inside the cage.
+        env = dict(os.environ, TMPDIR=tmp, GIT_CONFIG_GLOBAL="/dev/null")
+        for key, name in _XDG_DIRS.items():
+            env[key] = os.path.join(tmp, name)
+            os.mkdir(env[key])
+        with _contained():
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+                proc = subprocess.Popen(
+                    argv, cwd=worktree, env=env,
+                    # A new session has no controlling terminal to push input into.
+                    start_new_session=True,
+                    preexec_fn=sandbox.builder_cage_preexec(
+                        [worktree, *extra], [common_dir, *read], network))
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise StateError(f"refusing to start: cannot cage {argv[0]}: {exc}") from exc
+            return proc.wait()
 
 
 def _parser(prog, description):

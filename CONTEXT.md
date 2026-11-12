@@ -51,10 +51,16 @@ enforces; this file states what it does *not* claim.
   - Nothing forces the cage. `t12` cannot tell a caged builder from
     an uncaged one, and the run record does not say which it was.
   - The worktree's `.git` pointer file is writable inside the cage.
-    Only `t12-cage commit` checks it; `t12` commands run git in the
-    worktree without that check. Run `t12-cage commit` after the
-    builder and before any `t12` command, and stop the run when it
-    refuses.
+    Only `t12-cage commit` checks it. `t12 stage` and the gates run
+    git in the worktree without that check. Run `t12-cage commit`
+    after `t12-cage` returns and before any `t12` command, and stop
+    the run when it refuses.
+  - `t12-cage` kills every process the builder started before it
+    returns, including one that left its session with a double fork
+    and `setsid`, so nothing caged is left to rewrite the pointer
+    after the check. This fails when `t12-cage` itself dies from
+    `SIGKILL`: the builder's processes then keep running in the cage.
+    Do not commit a run whose `t12-cage` was killed that way.
   - On a kernel older than Landlock ABI 9 the builder can connect to
     a unix socket outside the cage (the session bus, a container
     daemon) and ask its owner to write for it. Older than ABI 6, it
@@ -62,6 +68,13 @@ enforces; this file states what it does *not* claim.
   - A path the operator adds with `--write` is outside the claim. A
     writable agent config directory lets the builder leave
     instructions for the next uncaged agent.
-  - The cage limits writes, not reads of what it is given. With
-    `--network`, the builder can send out anything it can read.
+  - The cage limits writes to file contents and directory entries.
+    It does not cover metadata: the builder can `chmod`, `utime`, or
+    set an xattr on any file the operator owns, the shared `.git`
+    included. That changes no content git reads, but it can make a
+    file unreadable to the operator.
+  - The cage does not stop data from leaving. It limits writes, not
+    reads of what it is given, and Landlock restricts TCP only. UDP
+    is open with or without `--network`, so the builder can send
+    anything it can read to any host, for example in DNS queries.
 - No network, no credentials, no model calls in the core or tests.
