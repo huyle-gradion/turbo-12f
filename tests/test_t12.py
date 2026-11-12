@@ -917,6 +917,11 @@ class CliCase(unittest.TestCase):
         committed = self._git(self.worktree, "rev-parse", f"{red['commit']}:tests/test_greet.py")
         self.assertEqual(red["test_blob"], committed)
 
+    def test_red_accepts_an_edit_to_an_existing_test_file(self):
+        self.write_worktree("tests/test_greet.py", "import unittest\n")
+        self.commit_worktree("test: placeholder")
+        self.do_red()
+
     def test_red_accepts_a_test_in_a_new_directory(self):
         self.write_worktree("tests/unit/test_greet.py", TEST_FILE)
         self.t12("red", "--home", self.home, "--task-id", "demo-1",

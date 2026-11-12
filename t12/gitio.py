@@ -55,11 +55,19 @@ def is_clean(repo):
 
 
 def dirty_paths(repo):
-    out = git_ok(repo, "status", "--porcelain", "--untracked-files=all")
+    """Every changed, staged, or untracked path, exactly as git names
+    it. A rename lists both its new and its old path."""
+    obs = git(repo, "status", "--porcelain", "-z", "--untracked-files=all")
+    if obs["timed_out"] or obs["exit_code"] != 0:
+        raise GitError(f"git status failed in {repo}: {obs['stderr'].strip()[:500]}")
+    entries = obs["stdout"].split("\0")
     paths = []
-    for line in out.splitlines():
-        if len(line) > 3:
-            paths.append(line[3:].strip().strip('"'))
+    while entries:
+        entry = entries.pop(0)
+        if len(entry) > 3:
+            paths.append(entry[3:])
+            if entry[0] in "RC" and entries:
+                paths.append(entries.pop(0))
     return paths
 
 
