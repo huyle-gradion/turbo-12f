@@ -30,8 +30,12 @@ bin/t12 deliver --home <state-home> --task-id <id> \
   default body ends its summary with `Closes #N` if the source is an
   issue of the same repo as the PR, and always with a `Source:` link
   to the issue. An issue in another repo or tracker gets only the
-  link, so merging never closes it. An explicit `--body` is used as
-  given.
+  link, so merging never closes it. The task's title, acceptance
+  criteria and manifest follow inside code blocks, with a WORD JOINER
+  after each `#` that precedes a digit: an issue author wrote that
+  text, so it can neither close an issue nor hide the rest of the
+  body. The default PR title breaks issue references the same way.
+  An explicit `--body` is used as given.
 
 ## Asana — mark a task complete
 

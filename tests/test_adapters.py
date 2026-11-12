@@ -9,6 +9,7 @@ READ is uncertain (state unknown), never denied or rejected; and a
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -19,6 +20,21 @@ from urllib.parse import urlparse, parse_qs
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANDIDATE = "a" * 40
 OTHER_HEAD = "b" * 40
+
+
+def outside_fences(markdown):
+    """Lines of markdown that render as text, not inside a ``` fence."""
+    lines, fence = [], None
+    for line in markdown.split("\n"):
+        opener = re.match(r"^(`{3,})", line)
+        if fence:
+            if opener and line.strip() == "`" * len(line.strip()) and len(line.strip()) >= len(fence):
+                fence = None
+        elif opener:
+            fence = opener.group(1)
+        else:
+            lines.append(line)
+    return lines
 
 
 def make_verified_home(tmp, adapter_fields=None):
@@ -252,6 +268,31 @@ class GitHubAdapterCase(AdapterCase):
         home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
         self.github(home)
         self.assertNotIn("Source:", FakeGitHub.BODIES[0]["body"])
+
+    def test_task_text_in_the_pr_cannot_close_issues_or_hide_the_body(self):
+        tmp = tempfile.mkdtemp(dir=self.tmp.name)
+        url = "https://github.example/o/r/issues/12"
+        criteria = ["closes #42", "fixes owner/other#7", "<!-- the rest is hidden",
+                    "a ```` run cannot end the block"]
+        home = make_verified_home(tmp, {
+            "github_repo": "o/r", "title": "Fixes #41", "acceptance_criteria": criteria,
+            "source": {"adapter": "github-issues", "ref": "o/r#12", "url": url}})
+        with open(os.path.join(home, "evidence", "demo-1", "manifest.txt"), "w") as fh:
+            fh.write("turbo-12f manifest — task demo-1: Fixes #41\n  - <!-- hide\n")
+        self.github(home)
+        sent = FakeGitHub.BODIES[0]
+        body = sent["body"]
+        self.assertEqual(re.findall(r"#\d+", body), ["#12"])
+        self.assertIn("closes #\u206042", body)
+        self.assertIn("owner/other#\u20607", body)
+        visible = outside_fences(body)
+        self.assertIn("Closes #12", visible)
+        self.assertIn(f"Source: {url}", visible)
+        for line in visible:
+            for text in ("Fixes", "closes", "<!--", "````"):
+                self.assertNotIn(text, line)
+        self.assertIn("a ```` run cannot end the block", body)
+        self.assertEqual(sent["title"], "Fixes #\u206041")
 
     def test_an_explicit_body_is_used_as_given(self):
         source = {"adapter": "github-issues", "ref": "o/r#12"}

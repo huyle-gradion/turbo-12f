@@ -50,6 +50,24 @@ def source_lines(source, issue_adapter, repo):
     return lines
 
 
+ISSUE_REF_RE = re.compile(r"#(?=\d)")
+
+
+def break_issue_refs(text):
+    """Text with no `#N` issue reference left: a WORD JOINER follows each
+    `#` before a digit, so a forge neither links nor closes it."""
+    return ISSUE_REF_RE.sub("#\u2060", text)
+
+
+def untrusted_block(text):
+    """Markdown that shows text as written and can do nothing else: no
+    closing keyword, no HTML comment that hides what follows. The fence
+    is longer than any backtick run in the text, so no line ends it."""
+    text = break_issue_refs(text.rstrip("\n"))
+    fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
+    return f"{fence}text\n{text}\n{fence}\n"
+
+
 def manifest_text(home, task_id):
     path = os.path.join(home, "evidence", task_id, "manifest.txt")
     if not os.path.isfile(path):
