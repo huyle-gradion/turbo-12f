@@ -705,6 +705,90 @@ class CliCase(unittest.TestCase):
         self.assertTrue(context["prior_review"]["voided"])
         self.assertEqual(context["prior_review"]["report"], "review-reviewer-1.md")
 
+    PRIOR_FINDINGS = [
+        {"id": "F1", "class": "contract", "severity": "major", "where": "app.py:2",
+         "finding": "greet() drops the name", "owner": "builder"},
+        {"id": "F2", "class": "docs", "severity": "minor", "where": "app.py:1",
+         "finding": "greet() has no docstring", "owner": "builder"},
+        {"id": "F3", "class": "naming", "severity": "minor", "where": "app.py:1",
+         "finding": "default name is unclear", "owner": "builder"},
+    ]
+    PRIOR_MARKS = {"F1": "fixed", "F2": "not fixed", "F3": "no longer applies"}
+
+    def reviewer_context(self, expect=0):
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", "reviewer", "--phase", "green", expect=expect)
+        if expect:
+            return result
+        return json.loads(result.stdout.split("--- context (JSON) ---\n", 1)[1])
+
+    def review_then_restage(self, verification="re-ran the red test"):
+        """A first review by tool call, blocked with PRIOR_FINDINGS, then a
+        new commit re-staged, which voids it. Returns the reviewed commit."""
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.assertIsNone(self.reviewer_context()["prior_review"])
+        self.act("reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "findings": self.PRIOR_FINDINGS,
+            "verification": verification}})
+        reviewed = self.run_record()["candidate"]["commit"]
+        self.write_worktree("app.py", APP_V2 + "# addressed review\n")
+        self.commit_worktree("fix: address review")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        return reviewed
+
+    def fake_reviewer(self, context):
+        """A stand-in reviewer model: marks each prior finding it is shown."""
+        findings = (context["prior_review"] or {}).get("findings")
+        findings = findings if isinstance(findings, list) else []
+        marks = "; ".join(f"{f['id']}: {self.PRIOR_MARKS[f['id']]}" for f in findings)
+        return {"tool": "review", "args": {
+            "verdict": "blocked", "findings": [self.PRIOR_FINDINGS[1]],
+            "verification": f"prior findings: {marks or 'none shown'}"}}
+
+    def test_re_review_context_carries_the_prior_findings_and_the_report_marks_them(self):
+        reviewed = self.review_then_restage()
+        prior = self.reviewer_context()["prior_review"]
+        self.assertIsNotNone(prior)
+        self.assertIsInstance(prior.get("findings"), list, prior)
+        self.assertEqual([f["id"] for f in prior["findings"]], ["F1", "F2", "F3"])
+        self.assertEqual(prior["findings"][0]["finding"], "greet() drops the name")
+        self.assertIn(prior["verdict"], ("changes-requested", "blocked"))
+        self.assertEqual(prior["commit"], reviewed)
+        rest = json.dumps({k: v for k, v in prior.items() if k != "findings"})
+        self.assertIn("superseded by", rest, "prior_review does not say why it was voided")
+
+        self.act("reviewer", "sess-reviewer", self.fake_reviewer(self.reviewer_context()))
+        review = self.run_record()["reviews"][-1]
+        self.assertEqual(review["report"]["name"], "review-reviewer-2.md")
+        with open(review["report"]["path"]) as fh:
+            report = fh.read()
+        for fid, mark in self.PRIOR_MARKS.items():
+            self.assertIn(f"{fid}: {mark}", report)
+
+    def test_re_review_context_refuses_a_tampered_prior_report(self):
+        self.review_then_restage()
+        path = self.run_record()["reviews"][0]["report"]["path"]
+        with open(path, "a") as fh:
+            fh.write("\n")
+        result = self.reviewer_context(expect=1)
+        self.assertIn("review-reviewer-1.md", result.stderr)
+
+    def test_re_review_context_passes_a_large_report_as_findings_only(self):
+        filler = "LONG-VERIFICATION-LOG " * 20000
+        self.review_then_restage(verification=filler)
+        prior = self.reviewer_context()["prior_review"]
+        self.assertEqual([f["id"] for f in prior.get("findings") or []], ["F1", "F2", "F3"])
+        blob = json.dumps(prior)
+        self.assertNotIn("LONG-VERIFICATION-LOG", blob)
+        self.assertLess(len(blob), 20000)
+
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
         self.write_worktree("app.py", APP_WRONG)  # close, but still failing
