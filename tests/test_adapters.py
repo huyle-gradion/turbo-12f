@@ -875,7 +875,7 @@ class EndToEndCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-1",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", json.dumps({"0": ["test_named"]}))
         with open(os.path.join(wt, "app.py"), "w") as fh:
             fh.write('def greet(name="world"):\n    return f"Hello, {name}!"\n')
         self._git(wt, "add", ".")

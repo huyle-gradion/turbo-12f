@@ -8,6 +8,7 @@ the worker did in the worktree.
 import argparse
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -394,6 +395,7 @@ def cmd_context(args):
         "gates": [{ "name": g["name"], "status": g["status"]} for g in run["gates"]],
         "roles": run.get("roles", {}),
         "prior_review": prior_review,
+        "covers": run["red"].get("covers") if run["red"] else None,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
         "human_responses": [
@@ -411,6 +413,34 @@ def cmd_context(args):
     print("--- context (JSON) ---")
     print(json.dumps(context, indent=2, sort_keys=True))
     return 0
+
+
+def _parse_covers(raw, criteria_count):
+    """The test-writer's map from each acceptance criterion index to the
+    tests that check it. Every criterion must be named."""
+    try:
+        covers = json.loads(raw) if isinstance(raw, str) else raw
+    except json.JSONDecodeError as exc:
+        raise StateError(f"cannot parse --covers as JSON: {exc}") from exc
+    if not isinstance(covers, dict):
+        raise StateError("--covers must map criterion indices to lists of test names")
+    indices = [str(i) for i in range(criteria_count)]
+    unknown = sorted(k for k in covers if k not in indices)
+    if unknown:
+        raise StateError(f"refusing red: covers names unknown criterion indices {unknown}; "
+                         f"criteria are {indices}")
+    missing = [i for i in indices if i not in covers]
+    if missing:
+        raise StateError(f"refusing red: covers is missing criterion indices {missing}")
+    for index, tests in covers.items():
+        if (not isinstance(tests, list) or not tests
+                or not all(isinstance(t, str) and t.strip() for t in tests)):
+            raise StateError(f"refusing red: covers[{index!r}] must be a non-empty list of test names")
+    return covers
+
+
+def _named(name, text):
+    return re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text) is not None
 
 
 def cmd_red(args):
@@ -438,7 +468,13 @@ def cmd_red(args):
         raise StateError(f"cannot parse --command: {exc}") from exc
     if not command:
         raise StateError("--command must not be empty")
+    covers = _parse_covers(args.covers, len(run["acceptance_criteria"]))
+    covered = sorted({t for tests in covers.values() for t in tests})
     commit = gitio.commit_with_path(wt, test_path, f"test({run['task_id']}): red test")
+    test_source = gitio.file_at(wt, commit, test_path)
+    absent = [t for t in covered if not _named(re.split(r"::|\.", t)[-1], test_source)]
+    if absent:
+        raise StateError(f"refusing red: covers names tests not in the red commit's {test_path}: {absent}")
     obs = _run_on_commit(home, run, wt, commit, command)
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] == 0:
@@ -458,6 +494,13 @@ def cmd_red(args):
             "output": combined[-4000:],
         })
         raise StateError(f"red output lacks the expected failure marker: {args.marker!r}")
+    passing = [t for t in covered if not _named(t, combined)]
+    if passing:
+        _save(home, run, "red-failed", {
+            "step": "red", "exit_code": obs["exit_code"],
+            "output": combined[-4000:],
+        })
+        raise StateError(f"refusing red: covered tests do not fail at the red commit: {passing}")
     ref = evidence.write_observation(home, run["task_id"], "red-output.txt", obs)
     gitio.move_branch_to(wt, commit)
     run["red"] = {
@@ -468,6 +511,7 @@ def cmd_red(args):
         "output": ref,
         "test_blob": gitio.blob_at(wt, commit, test_path),
         "commit": commit,
+        "covers": covers,
     }
     model.bind_session(run, args.role, args.session)
     model.transition(run, "red")
@@ -1175,7 +1219,8 @@ def cmd_act(args):
     if tool == "red_test_ready":
         return cmd_red(argparse.Namespace(
             **step, test_path=targs["test_path"],
-            command=shlex.join(targs["command"]), marker=targs["marker"]))
+            command=shlex.join(targs["command"]), marker=targs["marker"],
+            covers=targs["covers"]))
     if tool == "implementation_ready":
         return cmd_stage(argparse.Namespace(**step))
     if tool == "review":
@@ -1218,6 +1263,8 @@ def build_parser():
     p.add_argument("--test-path", required=True); p.add_argument("--command", required=True)
     p.add_argument("--marker", required=True); p.add_argument("--session", required=True,
                    help="test-writer session id (must differ from every other role's session)")
+    p.add_argument("--covers", required=True,
+                   help='JSON map of criterion index to the tests that check it, e.g. {"0": ["test_a"]}')
     p.set_defaults(func=cmd_red, role="test-writer")
 
     p = sub.add_parser("stage"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)

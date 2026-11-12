@@ -25,6 +25,9 @@ APP_V2 = '''def greet(name="world"):
 '''
 
 
+COVERS = json.dumps({"0": ["test_named"], "1": ["test_default"]})
+
+
 def task_dict(task_id="demo-1"):
     return {
         "id": task_id,
@@ -87,7 +90,7 @@ class DeliverCase(unittest.TestCase):
         self.t12("red", "--home", self.home, "--task-id", "demo-1",
                  "--test-path", "tests/test_greet.py",
                  "--command", "python3 -m unittest tests.test_greet -q",
-                 "--marker", "FAILED", "--session", "sess-test-writer")
+                 "--marker", "FAILED", "--session", "sess-test-writer", "--covers", COVERS)
         with open(os.path.join(self.worktree, "app.py"), "w") as fh:
             fh.write(APP_V2)
         self._git(self.worktree, "add", ".")

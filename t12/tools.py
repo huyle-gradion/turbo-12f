@@ -13,6 +13,7 @@ STR_LIST = "list of strings"
 FINDINGS = "list of findings"
 FINDING_FIELDS = ("id", "class", "severity", "where", "finding", "owner")
 ARGV = "non-empty list of strings"
+COVERS = "map of criterion index to test names"
 
 ESCALATE = {"escalate": {"question": STR}}
 
@@ -20,7 +21,7 @@ ESCALATE = {"escalate": {"question": STR}}
 # project names its own roles, but each maps to one of these kinds.
 TOOLS = {
     "test-writer": {
-        "red_test_ready": {"test_path": STR, "command": ARGV, "marker": STR},
+        "red_test_ready": {"test_path": STR, "command": ARGV, "marker": STR, "covers": COVERS},
         **ESCALATE,
     },
     "builder": {
@@ -51,6 +52,11 @@ def _check(name, value, kind):
     if kind in (STR_LIST, ARGV):
         ok = isinstance(value, list) and all(isinstance(v, str) for v in value)
         ok = ok and (kind == STR_LIST or value != [])
+        return None if ok else f"{name} must be a {kind}"
+    if kind == COVERS:
+        ok = isinstance(value, dict) and all(
+            isinstance(v, list) and v and all(isinstance(t, str) for t in v)
+            for v in value.values())
         return None if ok else f"{name} must be a {kind}"
     ok = isinstance(value, list) and all(isinstance(v, dict) for v in value)
     return None if ok else f"{name} must be a list of objects"
@@ -101,6 +107,9 @@ def _arg_schema(shape):
                    "required": list(FINDING_FIELDS),
                    "properties": {f: {"type": "string"} for f in FINDING_FIELDS}}
         return {"type": "array", "items": finding}
+    if shape == COVERS:
+        return {"type": "object", "additionalProperties": {
+            "type": "array", "items": {"type": "string"}, "minItems": 1}}
     return {"type": "array", "items": {"type": "string"},
             **({"minItems": 1} if shape == ARGV else {})}
 
