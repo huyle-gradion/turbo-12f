@@ -186,6 +186,7 @@ CRITERIA_HEADING_RE = re.compile(r"^acceptance criteria:?$", re.I)
 ITEM_RE = re.compile(r"^\s*[-*]\s+(?:\[[ xX]\]\s+)?(.+?)\s*$")
 LABELLED_RE = re.compile(r"^\s*(touches|depends[ _-]?on)\s*:\s*(.*?)\s*$", re.I)
 FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+COMMENT_RE = re.compile(r"<!--.*?-->")
 MAX_CRITERIA = 50
 MAX_TEXT = 1000
 PER_PAGE = 100
@@ -196,13 +197,28 @@ class IntakeError(Exception):
     """The adapter could not establish the issue list; nothing is written."""
 
 
-def _lines_outside_fences(body):
-    fenced = False
+def _visible_lines(body):
+    """Lines of the body that a forge renders as text: outside code
+    fences and HTML comments. The maintainer who applies the label
+    reads only these. An unclosed `<!--` hides the rest of the body."""
+    fenced = in_comment = False
     for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if FENCE_RE.match(line):
-            fenced = not fenced
-        elif not fenced:
-            yield line
+        if fenced:
+            fenced = not FENCE_RE.match(line)
+            continue
+        if in_comment:
+            end = line.find("-->")
+            if end < 0:
+                continue
+            line, in_comment = line[end + 3:], False
+        elif FENCE_RE.match(line):
+            fenced = True
+            continue
+        line = COMMENT_RE.sub("", line)
+        start = line.find("<!--")
+        if start >= 0:
+            line, in_comment = line[:start], True
+        yield line
 
 
 def parse_body(body, id_prefix):
@@ -211,7 +227,7 @@ def parse_body(body, id_prefix):
     `depends_on`; problem is why the issue cannot become a task."""
     criteria, in_section, seen = [], False, False
     labelled = {}
-    for line in _lines_outside_fences(body):
+    for line in _visible_lines(body):
         heading = HEADING_RE.match(line)
         if heading:
             in_section = not seen and bool(CRITERIA_HEADING_RE.match(heading.group(1)))

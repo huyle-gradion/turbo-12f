@@ -85,10 +85,13 @@ ignored.
 **The issue format.** The body must have a heading named
 "Acceptance criteria" (any level, case-insensitive) followed by a
 `- ` or `* ` list, or a `- [ ]` checklist, until the next heading.
-Each item is one criterion. Anything inside a code fence is ignored.
+Each item is one criterion. Anything inside a code fence or an HTML
+comment (`<!-- ... -->`) is ignored: the forge does not render a
+comment, so the maintainer who applied the label never saw it. An
+unclosed `<!--` hides the rest of the body.
 An issue without such a list is skipped and the reason is printed;
 intake never invents criteria. Two optional lines, anywhere outside
-a code fence, and only as `Name: value`:
+a code fence or comment, and only as `Name: value`:
 
 ```text
 Touches: src/auth, tests/auth
