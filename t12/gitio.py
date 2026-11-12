@@ -132,6 +132,13 @@ def commit_with_path(repo, rel_path, message):
             os.remove(index)
 
 
+def file_at(repo, commit, rel_path):
+    """The file's text at `commit`, or None when the commit lacks it."""
+    if git(repo, "cat-file", "-e", f"{commit}:{rel_path}")["exit_code"] != 0:
+        return None
+    return git_ok(repo, "show", f"{commit}:{rel_path}")
+
+
 def blob_at(repo, commit, rel_path):
     return git_ok(repo, "rev-parse", f"{commit}:{rel_path}")
 
