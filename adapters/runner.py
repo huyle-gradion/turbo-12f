@@ -13,6 +13,14 @@ through `t12-queue`, then takes each run's `next` from `t12 board --json`:
 - `human: ...`, `stopped: ...` and a spent budget are reported and
   skipped. The runner never answers an escalation and never merges.
 
+The tool call is taken from the reply in one of two ways, and `act`
+records which along with the whole reply. A model CLI that can enforce
+a JSON Schema while the model writes (`claude`, `codex exec`) is given
+the role's schema from `t12 tool-schema`. Any other reply, or a schema
+call with no structured result, is searched for exactly one tool call,
+bare or fenced; none or several distinct ones pass the reply on as it
+is. Either way `t12 act` checks the call against the registry.
+
 The runner writes no state. The run records and event logs are the
 only state, so it can be killed at any point and started again
 anywhere. Within one invocation it remembers which runs a step did not
@@ -26,6 +34,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -93,6 +102,92 @@ def call_model(model_cmd, prompt, env, cwd, timeout):
     return result.stdout, None
 
 
+def schema_cli(model_cmd):
+    """The model CLI whose schema flags the runner knows, or None."""
+    name = os.path.basename(model_cmd[0])
+    if name == "claude" or (name == "codex" and model_cmd[1:2] == ["exec"]):
+        return name
+    return None
+
+
+def with_schema(model_cmd, cli, schema_path, result_path):
+    """model_cmd with the flags that make its CLI enforce the schema. They
+    go right after the program (or its subcommand): a flag such as
+    `-p` may take the next word as its value."""
+    with open(schema_path, encoding="utf-8") as fh:
+        schema = fh.read()
+    if cli == "claude":
+        return [model_cmd[0], "--output-format", "json", "--json-schema", schema,
+                *model_cmd[1:]]
+    return [*model_cmd[:2], "--output-schema", schema_path, "-o", result_path,
+            *model_cmd[2:]]
+
+
+def structured_result(cli, stdout, result_path):
+    """(the tool call the CLI enforced or None, the reply's text)."""
+    if cli == "claude":
+        try:
+            envelope = json.loads(stdout)
+        except ValueError:
+            return None, stdout
+        if not isinstance(envelope, dict):
+            return None, stdout
+        result = envelope.get("structured_output")
+        text = envelope.get("result")
+        return (json.dumps(result) if isinstance(result, dict) else None,
+                text if isinstance(text, str) else stdout)
+    try:
+        with open(result_path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return None, stdout
+    try:
+        return (text if isinstance(json.loads(text), dict) else None), text
+    except ValueError:
+        return None, text
+
+
+FENCED = re.compile(r"```[a-zA-Z]*[ \t]*\n(.*?)```", re.S)
+LINE_START_OBJECT = re.compile(r"(?m)^[ \t]*\{")
+
+
+def extract_tool_call(text):
+    """The one tool call in a reply that wraps it in prose or a fence, or
+    prints it more than once, or None when there is none or there are
+    two that differ. Never repairs JSON: it only finds it."""
+    decoder = json.JSONDecoder()
+    starts = [block.lstrip() for block in FENCED.findall(text)]
+    starts += [text[m.end() - 1:] for m in LINE_START_OBJECT.finditer(text)]
+    calls = {}
+    for start in starts:
+        try:
+            value, _ = decoder.raw_decode(start)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and "tool" in value:
+            calls[json.dumps(value, sort_keys=True)] = value
+    return json.dumps(next(iter(calls.values()))) if len(calls) == 1 else None
+
+
+def is_json(text):
+    try:
+        json.loads(text)
+    except ValueError:
+        return False
+    return True
+
+
+def tool_call(cli, output, result_path):
+    """(the JSON to hand `act`, how it was got)."""
+    structured, text = structured_result(cli, output, result_path) if cli else (None, output)
+    if structured is not None:
+        return structured, "schema"
+    if text == output and is_json(output):
+        return output, "raw"
+    extracted = extract_tool_call(text)
+    return (extracted, "extracted") if extracted is not None else (output, "raw")
+
+
 def worker_step(home, row, role, model_cmd, scratch):
     task_id = row["task_id"]
     ctx = t12("context", "--home", home, "--task-id", task_id,
@@ -103,17 +198,39 @@ def worker_step(home, row, role, model_cmd, scratch):
     session = f"{role}-{uuid.uuid4().hex[:16]}"
     env = dict(os.environ, T12_TASK_ID=task_id, T12_ROLE=role, T12_SESSION=session,
                T12_WORKTREE=worktree)
+    cli = schema_cli(model_cmd)
+    schema_path = os.path.join(scratch, f"{task_id}-{session}.schema.json")
+    if cli:
+        schema = t12("tool-schema", "--home", home, "--task-id", task_id, "--role", role)
+        if schema.returncode != 0:
+            return f"tool-schema failed: {schema.stderr.strip()}"
+        with open(schema_path, "w", encoding="utf-8") as fh:
+            fh.write(schema.stdout)
     prompt = ctx.stdout
     for attempt in (1, 2):
-        output, failure = call_model(model_cmd, prompt, env, worktree,
+        base = os.path.join(scratch, f"{task_id}-{session}-{attempt}")
+        result_path = base + ".result.json"
+        argv = with_schema(model_cmd, cli, schema_path, result_path) if cli else model_cmd
+        output, failure = call_model(argv, prompt, env, worktree,
                                      max(1, row["time_left_s"] or 1))
+        if failure and cli and failure.startswith("exit "):
+            print(f"warning: {cli} with the tool-call schema failed ({failure}); "
+                  "calling it again without the schema", file=sys.stderr)
+            cli, argv = None, model_cmd
+            output, failure = call_model(argv, prompt, env, worktree,
+                                         max(1, row["time_left_s"] or 1))
         if failure:
             return f"{role} model call failed ({failure}); no output recorded"
-        out_path = os.path.join(scratch, f"{task_id}-{session}-{attempt}.json")
+        payload, parsed_by = tool_call(cli, output, result_path)
+        out_path, raw_path = base + ".json", base + ".raw.txt"
         with open(out_path, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        with open(raw_path, "w", encoding="utf-8") as fh:
             fh.write(output)
+        extra = [] if payload == output else ["--raw", raw_path]
         act = t12("act", "--home", home, "--task-id", task_id, "--role", role,
-                  "--session", session, "--input", out_path)
+                  "--session", session, "--input", out_path,
+                  "--parsed-by", parsed_by, *extra)
         if act.returncode == 0:
             return act.stdout.strip()
         error = act.stderr.strip()
@@ -184,8 +301,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="runner", description=__doc__.splitlines()[0])
     parser.add_argument("--home", required=True)
     parser.add_argument("--model-cmd", required=True,
-                        help="command for one worker call, e.g. 'claude -p': the prompt on "
-                             "stdin, only the JSON tool call on stdout")
+                        help="command for one worker call, e.g. 'claude -p' or 'codex exec': "
+                             "the prompt on stdin, the reply on stdout")
     parser.add_argument("--queue", help="directory of task files to admit each pass")
     parser.add_argument("--max", type=int, default=1, help="most runs active at once")
     parser.add_argument("--notify-cmd",
@@ -198,8 +315,12 @@ def main(argv=None):
         except BlockingIOError:
             print("error: another runner is driving this state home", file=sys.stderr)
             return 1
-        drive(home, args.queue and os.path.abspath(args.queue), args.max,
-              shlex.split(args.model_cmd),
+        model_cmd = shlex.split(args.model_cmd)
+        cli = schema_cli(model_cmd)
+        print(f"model: {cli} enforces the tool-call schema" if cli else
+              f"model: {os.path.basename(model_cmd[0])} has no known schema flag; "
+              "tool calls are taken from the reply's text")
+        drive(home, args.queue and os.path.abspath(args.queue), args.max, model_cmd,
               shlex.split(args.notify_cmd) if args.notify_cmd else None)
     return 0
 

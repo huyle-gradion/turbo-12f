@@ -48,12 +48,12 @@ class RunnerCase(unittest.TestCase):
         with open(path, "w") as fh:
             json.dump(task, fh)
 
-    def drive(self, mode="", expect=0):
+    def drive(self, mode="", expect=0, model_cmd=None):
         env = dict(os.environ, FAKE_MODE=mode, FAKE_LOG=self.log, PYTHONDONTWRITEBYTECODE="1")
         notify = f"{sys.executable} -c 'import sys; open(sys.argv[1], \"a\").write(sys.argv[2] + \"\\n\")' {self.notes}"
         result = subprocess.run(
             [sys.executable, RUNNER, "--home", self.home, "--queue", self.queue, "--max", "1",
-             "--model-cmd", f"{sys.executable} {FAKE}", "--notify-cmd", notify],
+             "--model-cmd", model_cmd or f"{sys.executable} {FAKE}", "--notify-cmd", notify],
             capture_output=True, text=True, timeout=300, env=env)
         self.assertEqual(result.returncode, expect, result.stdout + result.stderr)
         return result.stdout
@@ -100,6 +100,49 @@ class RunnerCase(unittest.TestCase):
         builder = [c for c in self.calls() if c["role"] == "builder"]
         self.assertEqual([c["rejected"] for c in builder], [False, True])
         self.assertEqual(builder[0]["session"], builder[1]["session"])
+
+    def worker_events(self):
+        events = [json.loads(e) for e in
+                  self.lines(os.path.join(self.home, "runs", "demo-1.events.jsonl"))]
+        return [e for e in events if e["type"].startswith("worker-output")]
+
+    def test_a_fenced_or_repeated_tool_call_is_taken_from_the_reply_and_the_reply_kept(self):
+        for mode in ("fenced", "twice"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.drive(mode=mode)
+                self.assertEqual(self.run_record()["phase"], "local-verified")
+                self.assertFalse(any(c["rejected"] for c in self.calls()))
+                events = self.worker_events()
+                self.assertEqual({e["type"] for e in events}, {"worker-output"})
+                self.assertEqual({e["detail"]["parsed_by"] for e in events}, {"extracted"})
+                with open(events[0]["detail"]["raw"]["path"]) as fh:
+                    raw = fh.read()
+                with open(events[0]["detail"]["output"]["path"]) as fh:
+                    self.assertEqual(json.loads(fh.read())["tool"], "red_test_ready")
+                self.assertNotEqual(raw.strip(), "")
+                self.assertIn('"red_test_ready"', raw)
+
+    def test_a_cli_that_enforces_a_schema_gets_the_roles_schema(self):
+        bindir = os.path.join(self.tmp.name, "bin")
+        os.makedirs(bindir)
+        claude = os.path.join(bindir, "claude")
+        with open(claude, "w") as fh:
+            fh.write(f"#!/bin/sh\nexec {sys.executable} {FAKE} \"$@\"\n")
+        os.chmod(claude, 0o755)
+        out = self.drive(model_cmd=f"{claude} -p")
+        self.assertIn("model: claude enforces the tool-call schema", out)
+        self.assertEqual(self.run_record()["phase"], "local-verified")
+        self.assertEqual([c["schema_tools"] for c in self.calls()],
+                         [["escalate", "red_test_ready"], ["escalate", "implementation_ready"],
+                          ["escalate", "review"]])
+        self.assertEqual({e["detail"]["parsed_by"] for e in self.worker_events()}, {"schema"})
+
+    def test_a_clean_reply_is_passed_on_as_it_is(self):
+        self.drive()
+        events = self.worker_events()
+        self.assertEqual({e["detail"]["parsed_by"] for e in events}, {"raw"})
+        self.assertFalse(any("raw" in e["detail"] for e in events))
 
     def test_a_restarted_runner_carries_on_from_the_run_record(self):
         out = self.drive(mode="builder-fails")

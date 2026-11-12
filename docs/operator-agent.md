@@ -112,7 +112,10 @@ python3 factory/adapters/runner.py --home state --queue queue --max <N> \
 
 The model command reads a prompt on stdin and prints the reply, and
 must be able to edit files and run `git commit` in the worktree it is
-started in, for example `claude -p --permission-mode bypassPermissions`.
+started in, for example `claude -p --permission-mode bypassPermissions`
+or `codex exec --dangerously-bypass-approvals-and-sandbox`. For
+`claude` and `codex exec` the runner holds the reply to the role's
+tool-call schema; its first line says whether it does.
 
 The runner prints a line only when a step ends, and a model step takes
 minutes. Silence is normal. To see progress, read
