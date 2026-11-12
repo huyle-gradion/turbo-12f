@@ -182,5 +182,19 @@ class ArchiveTest(unittest.TestCase):
             self.assertEqual(archived["phase"], "stopped")
 
 
+
+class PolicyTest(unittest.TestCase):
+    def test_adding_or_editing_a_policy_needs_a_security_review(self):
+        for base_policy in (None, '{"security_review_paths": ["src/auth"]}'):
+            roots = model.security_paths(base_policy)
+            self.assertTrue(model.under(".t12/policy.json", roots), base_policy)
+            self.assertFalse(model.under("src/other.py", roots), base_policy)
+        self.assertTrue(model.under("src/auth/login.py", roots))
+
+    def test_a_malformed_policy_on_the_base_is_refused(self):
+        for text in ("[]", "not json", '{"security_review_paths": ["../x"]}'):
+            with self.assertRaises(StateError):
+                model.security_paths(text)
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,7 +13,7 @@ import sys
 import time
 
 from . import delivery as delivery_mod
-from . import evidence, gates as gate_mod, gitio, limits, model, runner, sandbox, store, tools
+from . import evidence, gates as gate_mod, gitio, limits, model, retro, runner, sandbox, store, tools
 from .errors import StateError, T12Error
 
 VERSION = "0.1.0"
@@ -257,7 +257,7 @@ def _admit(home, repo, task, task_id, supersede):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
-    gitio.rev_parse(repo, base)
+    base_commit = gitio.rev_parse(repo, base)
     for gate in task.get("gates", []):
         try:
             sandbox.check_command(gate.get("command") or [])
@@ -285,13 +285,13 @@ def _admit(home, repo, task, task_id, supersede):
             gitio.delete_branch(repo, old["branch"])
     calibrated = limits.load_limits(home)
     adapter, image = sandbox.resolve_adapter(task)
-    run = model.new_run(task, repo, home, supersedes=supersedes,
+    run = model.new_run(task, repo, home, base_commit, supersedes=supersedes,
                         defaults=calibrated,
                         defaults_source="calibrated" if calibrated else "builtin",
                         sandbox_adapter=adapter, sandbox_image=image)
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
-    gitio.add_worktree(repo, run["worktree"], run["branch"], base)
+    gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
     model.transition(run, "ready")
     _save(home, run, "prepared", {"branch": run["branch"], "base": base,
                                   "supersedes": supersedes})
@@ -346,6 +346,7 @@ def cmd_context(args):
         "branch": run["branch"],
         "worktree": wt,
         "base": run["base"],
+        "touches": run.get("touches"),
         "budgets": {
             "time_left_s": int(model.time_left_s(run)),
             "ops_left": run["budgets"]["op_limit"] - run["budgets"]["ops_used"],
@@ -380,6 +381,8 @@ def cmd_red(args):
     test_path = args.test_path
     if not os.path.exists(os.path.join(wt, test_path)):
         raise StateError(f"test file not found in worktree: {test_path}")
+    if model.outside_touches(run, [os.path.normpath(test_path)]):
+        raise StateError(f"refusing red: the test is outside the task's touches: {test_path}")
     dirty = set(gitio.dirty_paths(wt))
     if dirty - {test_path}:
         raise StateError(f"refusing red: unrelated dirty files: {sorted(dirty - {test_path})}")
@@ -446,6 +449,17 @@ def cmd_stage(args):
         raise StateError("refusing stage: candidate does not descend from the red commit")
     if gitio.blob_hash(wt, run["red"]["test_path"]) != run["red"]["test_blob"]:
         raise StateError("refusing stage: red test file changed after the red phase")
+    sensitive = []
+    if run.get("base_commit"):
+        changed = gitio.changed_paths(wt, run["base_commit"], candidate)
+        outside = model.outside_touches(run, changed)
+        if outside:
+            raise StateError("refusing stage: the candidate changes paths outside the "
+                             f"task's touches: {', '.join(outside)}")
+        roots = model.security_paths(gitio.file_at(wt, run["base_commit"], model.POLICY_PATH))
+        sensitive = [p for p in changed if model.under(p, roots)]
+        if sensitive and "security" not in run["required_reviews"]:
+            run["required_reviews"].append("security")
     if run["phase"] in ("gates", "green"):
         gate_mod.reset_for_new_candidate(run)
         run["replay"] = None
@@ -454,7 +468,7 @@ def cmd_stage(args):
     model.bump_op(run)
     model.bind_session(run, "builder", args.session)
     model.transition(run, "gates")
-    _save(home, run, "staged", {"commit": candidate})
+    _save(home, run, "staged", {"commit": candidate, "security_paths": sensitive})
     print(f"staged: candidate={candidate[:12]}")
     return 0
 
@@ -481,6 +495,7 @@ def cmd_gate(args):
         run["budgets"]["repairs_used"] += 1
         _save(home, run, "gate-failed", {
             "step": gate["name"], "exit_code": obs["exit_code"],
+            "duration_s": obs["duration_s"],
             "output": (obs["stdout"] + obs["stderr"])[-4000:],
         })
         if run["budgets"]["repairs_used"] > run["budgets"]["repair_cap"]:
@@ -499,7 +514,7 @@ def cmd_gate(args):
         )
     gate["status"] = "passed"
     gate["observation"] = ref
-    _save(home, run, "gate-passed", {"gate": gate["name"]})
+    _save(home, run, "gate-passed", {"gate": gate["name"], "duration_s": obs["duration_s"]})
     if gate_mod.all_passed(run):
         print(f"gate {gate['name']}: passed — all gates passed, run replay next")
     else:
@@ -954,6 +969,18 @@ def cmd_board(args):
     return 0
 
 
+def cmd_retro(args):
+    home = _home(args)
+    _config(home)
+    data = retro.collect(home)
+    found = retro.proposals(data, args.min)
+    if args.json:
+        print(json.dumps(dict(data, home=home, proposals=found), indent=2, sort_keys=True))
+    else:
+        print(retro.report_text(home, data, found), end="")
+    return 0
+
+
 def cmd_calibrate(args):
     home = _home(args)
     data = limits.collect(home)
@@ -1135,6 +1162,12 @@ def build_parser():
     p.add_argument("--home", required=True); p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_board)
 
+    p = sub.add_parser("retro", help="recurring lessons across runs, each with a proposed check")
+    p.add_argument("--home", required=True); p.add_argument("--json", action="store_true")
+    p.add_argument("--min", type=int, default=retro.MIN_COUNT,
+                   help=f"how often a lesson must recur to be proposed (default {retro.MIN_COUNT})")
+    p.set_defaults(func=cmd_retro)
+
     p = sub.add_parser("calibrate"); p.add_argument("--home", required=True)
     p.add_argument("--apply", action="store_true",
                    help="write the recommended defaults to limits.json")
@@ -1174,6 +1207,12 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
+        if getattr(args, "home", None):
+            home = os.path.realpath(args.home)
+            if os.path.commonpath([os.path.realpath(PROJECT_ROOT), home]) == home:
+                raise StateError(
+                    f"refusing: this t12 ({PROJECT_ROOT}) runs from inside the state home; "
+                    "a candidate never certifies itself, run the installed factory instead")
         if getattr(args, "task_id", None) is None or args.func in (cmd_status, cmd_context):
             return args.func(args)
         with model.run_lock(_home(args), args.task_id):

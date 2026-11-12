@@ -997,6 +997,234 @@ class CliCase(unittest.TestCase):
         self.assertEqual(self.event_types().count("worker-output-rejected"), len(rejected))
         self.assertEqual(self.run_record()["budgets"]["ops_used"], len(rejected))
 
+    def drive_to_verified(self, home, task_id, app=APP_V2):
+        wt = os.path.join(home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", task_id,
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(app)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        self.t12("stage", "--home", home, "--task-id", task_id, "--session", "sess-builder")
+        self.t12("gate", "--home", home, "--task-id", task_id, "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", home, "--task-id", task_id)
+        self.do_review(home=home, task_id=task_id)
+        self.t12("green", "--home", home, "--task-id", task_id)
+        return self.run_record(home, task_id)["candidate"]["commit"]
+
+    def test_red_refuses_a_test_outside_touches(self):
+        home, task = self.prepare_custom("demo-red-narrow", touches=["app.py"])
+        self.t12("prepare", "--home", home, "--task", task)
+        with open(os.path.join(home, "worktrees", "demo-red-narrow", "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        result = self.t12("red", "--home", home, "--task-id", "demo-red-narrow",
+                          "--test-path", "tests/test_greet.py",
+                          "--command", "python3 -m unittest tests.test_greet -q",
+                          "--marker", "FAILED", "--session", "sess-test-writer", expect=1)
+        self.assertIn("outside the task's touches: tests/test_greet.py", result.stderr)
+
+    def test_stage_refuses_changes_outside_touches(self):
+        home, task = self.prepare_custom("demo-narrow", touches=["tests"])
+        self.t12("prepare", "--home", home, "--task", task)
+        wt = os.path.join(home, "worktrees", "demo-narrow")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-narrow",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        result = self.t12("stage", "--home", home, "--task-id", "demo-narrow",
+                          "--session", "sess-builder", expect=1)
+        self.assertIn("outside the task's touches: app.py", result.stderr)
+
+        home, task = self.prepare_custom("demo-wide", touches=["app.py", "tests"])
+        self.t12("prepare", "--home", home, "--task", task)
+        self.drive_to_verified(home, "demo-wide")
+
+    def test_touches_and_depends_on_are_checked_at_admission(self):
+        for field, bad, message in (("touches", ["../x"], "touches"),
+                                    ("touches", "app.py", "touches"),
+                                    ("depends_on", ["no spaces"], "depends_on")):
+            home, task = self.prepare_custom("demo-bad", **{field: bad})
+            result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+            self.assertIn(message, result.stderr)
+            shutil.rmtree(home)
+
+    def queue(self, home, queue_dir, max_runs):
+        result = subprocess.run(
+            [os.path.join(ROOT, "bin", "t12-queue"), "--home", home, "--queue", queue_dir,
+             "--max", str(max_runs)], capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = {}
+        for line in result.stdout.splitlines():
+            verdict, rest = line.split(" ", 1)
+            task_id, _, why = rest.partition(": ")
+            lines[task_id] = (verdict, why)
+        return lines
+
+    def test_queue_starts_only_tasks_that_cannot_collide(self):
+        home = os.path.join(self.tmp.name, "home-queue")
+        self.t12("init", "--home", home, "--repo", self.repo)
+        queue_dir = os.path.join(self.tmp.name, "queue")
+        os.makedirs(queue_dir)
+        for name, fields in (("a", {"touches": ["app.py", "tests"]}),
+                             ("b", {"touches": ["app.py"]}),
+                             ("c", {"touches": ["docs"]}),
+                             ("d", {"touches": ["lib"], "depends_on": ["q-a"]}),
+                             ("e", {"touches": ["./app.py"]})):
+            task = task_dict(task_id=f"q-{name}")
+            task.update(fields)
+            with open(os.path.join(queue_dir, f"{name}.json"), "w") as fh:
+                json.dump(task, fh)
+
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-a": ("started", ""),
+            "q-b": ("waiting", "touches overlap q-a"),
+            "q-c": ("started", ""),
+            "q-d": ("waiting", "depends on q-a, not merged yet"),
+            "q-e": ("waiting", "touches overlap q-a"),
+        })
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-b": ("waiting", "touches overlap q-a"),
+            "q-d": ("waiting", "depends on q-a, not merged yet"),
+            "q-e": ("waiting", "touches overlap q-a"),
+        })
+
+        candidate = self.drive_to_verified(home, "q-a")
+        self.assertEqual(self.queue(home, queue_dir, 2)["q-b"],
+                         ("waiting", "touches overlap q-a"))
+        self._git(self.repo, "merge", "--ff-only", candidate)
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-b": ("started", ""),
+            "q-d": ("waiting", "at capacity (2 active)"),
+            "q-e": ("waiting", "touches overlap q-b"),
+        })
+        self.t12("stop", "--home", home, "--task-id", "q-c", "--reason", "done elsewhere")
+        self.assertEqual(self.queue(home, queue_dir, 2), {
+            "q-d": ("started", ""),
+            "q-e": ("waiting", "touches overlap q-b"),
+        })
+        self.assertEqual(self.run_record(home, "q-d")["base_commit"], candidate)
+
+    def act_in(self, home, task_id, role, session, output, expect=0):
+        path = os.path.join(self.tmp.name, f"act-{task_id}-{role}.json")
+        with open(path, "w") as fh:
+            json.dump(output, fh)
+        return self.t12("act", "--home", home, "--task-id", task_id, "--role", role,
+                        "--session", session, "--input", path, expect=expect)
+
+    def run_with_recurring_mistakes(self, home, task_id):
+        self.act_in(home, task_id, "reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "verification": "too early",
+            "findings": [{"id": "R0", "class": ["Bug"], "severity": "Blocker"}]}}, expect=1)
+        self.act_in(home, task_id, "test-writer", "sess-tw", {"tool": "red_test_ready", "args": {
+            "test_path": "tests/test_greet.py", "command": ["python3", "t.py"]}}, expect=1)
+        self.t12("escalate", "--home", home, "--task-id", task_id, "--question", "Which locale?")
+        self.t12("resume", "--home", home, "--task-id", task_id, "--answer", "en only")
+        wt = os.path.join(home, "worktrees", task_id)
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", task_id,
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-tw")
+        for app, expect in ((APP_WRONG, 1), (APP_V2, 0)):
+            with open(os.path.join(wt, "app.py"), "w") as fh:
+                fh.write(app)
+            self._git(wt, "commit", "-qam", "feat: implement greet")
+            self.t12("stage", "--home", home, "--task-id", task_id, "--session", "sess-builder")
+            self.t12("gate", "--home", home, "--task-id", task_id, "--name", "unit",
+                     "--session", "sess-qa", expect=expect)
+        self.t12("replay", "--home", home, "--task-id", task_id)
+        self.act_in(home, task_id, "reviewer", "sess-reviewer", {"tool": "review", "args": {
+            "verdict": "blocked", "verification": "re-ran the gate",
+            "findings": [{"id": "R1", "class": "Verification miss", "severity": "Blocker",
+                          "where": "tests/test_greet.py:1", "finding": "no edge case",
+                          "owner": "qa"}]}})
+
+    def test_retro_proposes_a_check_for_each_recurring_lesson(self):
+        home = os.path.join(self.tmp.name, "home-retro")
+        self.t12("init", "--home", home, "--repo", self.repo)
+        for task_id in ("lesson-1", "lesson-2"):
+            path = os.path.join(self.tmp.name, f"{task_id}.json")
+            with open(path, "w") as fh:
+                json.dump(task_dict(task_id=task_id), fh)
+            self.t12("prepare", "--home", home, "--task", path)
+            self.run_with_recurring_mistakes(home, task_id)
+
+        def snapshot():
+            files = {}
+            for root, _, names in os.walk(home):
+                for name in names:
+                    with open(os.path.join(root, name), "rb") as fh:
+                        files[os.path.join(root, name)] = fh.read()
+            return files
+
+        before = snapshot()
+        report = json.loads(self.t12("retro", "--home", home, "--json", "--min", "2").stdout)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(report["gates"]["unit"]["failed_runs"], 2)
+        self.assertEqual(len(report["gates"]["unit"]["durations_s"]), 4)
+        kinds = {p["kind"]: p for p in report["proposals"]}
+        self.assertEqual(set(kinds), {"gate", "rejected-output", "finding", "escalation"})
+        self.assertIn("unit failed in 2 of 2 runs", kinds["gate"]["evidence"])
+        self.assertIn("Verification miss in 2 of 2", kinds["finding"]["evidence"])
+        self.assertEqual(report["runs_with_finding"], {"Verification miss": 2})
+        self.assertIn("Which locale?", kinds["escalation"]["evidence"])
+        self.assertIn("missing", kinds["rejected-output"]["evidence"])
+        text = self.t12("retro", "--home", home, "--min", "2").stdout
+        self.assertIn("Verification miss", text)
+        self.assertIn("changes nothing", text)
+
+    def test_a_factory_inside_the_state_home_refuses_to_run(self):
+        copy = os.path.join(self.home, "worktrees", "demo-1")
+        shutil.copytree(os.path.join(ROOT, "t12"), os.path.join(copy, "t12"),
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(os.path.join(ROOT, "bin"), os.path.join(copy, "bin"))
+        result = subprocess.run(
+            [os.path.join(copy, "bin", "t12"), "status", "--home", self.home, "--task-id", "demo-1"],
+            capture_output=True, text=True, timeout=60, cwd=self.tmp.name)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("runs from inside the state home", result.stderr)
+
+    def test_policy_paths_on_the_base_require_a_security_review(self):
+        os.makedirs(os.path.join(self.repo, ".t12"))
+        with open(os.path.join(self.repo, ".t12", "policy.json"), "w") as fh:
+            json.dump({"security_review_paths": ["app.py"]}, fh)
+        self._git(self.repo, "add", ".")
+        self._git(self.repo, "commit", "-qm", "policy")
+        home, task = self.prepare_custom("demo-policy")
+        self.t12("prepare", "--home", home, "--task", task)
+        wt = os.path.join(home, "worktrees", "demo-policy")
+        with open(os.path.join(wt, ".t12", "policy.json"), "w") as fh:
+            json.dump({"security_review_paths": []}, fh)
+        self._git(wt, "commit", "-qam", "chore: try to drop the policy")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-policy",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer")
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        self.t12("stage", "--home", home, "--task-id", "demo-policy", "--session", "sess-builder")
+        self.assertEqual(self.run_record(home, "demo-policy")["required_reviews"],
+                         ["reviewer", "security"])
+        self.t12("gate", "--home", home, "--task-id", "demo-policy", "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", home, "--task-id", "demo-policy")
+        self.do_review(home=home, task_id="demo-policy")
+        result = self.t12("green", "--home", home, "--task-id", "demo-policy", expect=1)
+        self.assertIn("security review", result.stderr)
+        self.do_review(home=home, task_id="demo-policy", role="security", session="sess-security")
+        self.t12("green", "--home", home, "--task-id", "demo-policy")
+
     def board(self):
         rows = json.loads(self.t12("board", "--home", self.home, "--json").stdout)
         return {row["task_id"]: row for row in rows}
