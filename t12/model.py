@@ -282,6 +282,27 @@ def open_escalation(run):
     return None
 
 
+SOURCE_URL_RE = re.compile(r"https?://\S+")
+
+
+def _source(task):
+    """Where the task came from, as an intake adapter wrote it. Kept to
+    one line per field so a delivery adapter can quote it in a change
+    request without escaping."""
+    source = task.get("source")
+    if source is None:
+        return None
+    url = source.get("url") if isinstance(source, dict) else None
+    if (not isinstance(source, dict) or set(source) - {"adapter", "ref", "url"}
+            or not all(isinstance(source.get(k), str) and re.fullmatch(r"\S+", source[k])
+                       for k in ("adapter", "ref"))
+            or (url is not None and not (isinstance(url, str) and SOURCE_URL_RE.fullmatch(url)))):
+        raise StateError(
+            'source must be {"adapter": str, "ref": str, "url": http(s) URL (optional)}, '
+            f"each without whitespace: {source!r}")
+    return {"adapter": source["adapter"], "ref": source["ref"], "url": url}
+
+
 def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
@@ -335,6 +356,7 @@ def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None
     if not isinstance(depends_on, list) or not all(
             isinstance(d, str) and TASK_ID_RE.match(d) for d in depends_on):
         raise StateError(f"depends_on must be a list of task ids: {depends_on!r}")
+    source = _source(task)
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -345,6 +367,7 @@ def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None
         "base_commit": base_commit,
         "touches": touches,
         "depends_on": list(depends_on),
+        "source": source,
         "branch": task.get("branch") or f"task/{task['id']}",
         "worktree": os.path.join(home, "worktrees", task["id"]),
         "phase": "unadmitted",

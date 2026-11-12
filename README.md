@@ -181,7 +181,8 @@ file only says what is unique to it:
   "roles": {
     "builder": {"skills": ["plain-ui-copy"]},
     "ux-copy": {"kind": "review", "prompt": "ux-copy.md"}
-  }
+  },
+  "intake": {"adapter": "github-issues", "repo": "owner/my-product", "label": "factory"}
 }
 ```
 
@@ -206,7 +207,7 @@ may come from an issue tracker:
 | `sandbox_adapter`, `sandbox_image` | Refused unless equal |
 | `verify_deps` | The task may only narrow the profile's list; a profile without one allows none |
 | budgets | The task wins |
-| `protected_paths`, `security_review_paths`, `roles` | Profile only; a task may not set them |
+| `protected_paths`, `security_review_paths`, `roles`, `intake` | Profile only; a task may not set them |
 
 `stage` refuses a candidate that changes a protected path, measured
 from both the task's base and the point where the candidate leaves
@@ -226,6 +227,9 @@ any role a prompt or skills, but may not change a built-in's kind.
 green waits for an approving `ux-copy` review as well as the
 reviewer's.
 
+`intake` says where tasks come from; only an intake adapter reads it
+(see "Taking tasks from an issue tracker"). `prepare` validates it.
+
 `context --role R` reads R's instructions in layers. The prompt is
 `.t12/prompts/<prompt>` on the trunk commit when the role names one,
 else the factory's `prompts/<role>.md` for a built-in role, or the
@@ -235,6 +239,47 @@ prompt of the first built-in role of its kind for a project role
 `skills/<name>/SKILL.md`; a skill found in neither is refused at
 `prepare` and `context`. A worktree edit to `.t12/` changes none of
 this for the running task.
+
+## Taking tasks from an issue tracker
+
+A task file need not be hand-written. An intake adapter turns issues
+with a label into task files in a queue directory:
+
+```bash
+export GITHUB_TOKEN=...
+python3 adapters/github-issues.py intake --repo-config path/to/.t12/project.json \
+  --out-dir queue --home /path/to/state-home
+bin/t12-queue --home /path/to/state-home --queue queue --max 3
+```
+
+The issue needs an "Acceptance criteria" heading with a `- ` list; an
+issue without one is skipped with the reason printed. The task file
+holds only `id` (`gh-<number>`), `title`, `acceptance_criteria`,
+optional `touches` and `depends_on`, and
+`source: {"adapter", "ref", "url"}`. Gates, reviews, sandbox and
+everything else the profile controls never come from an issue, and
+re-running intake changes nothing that is unchanged or already has a
+run. Text inside an HTML comment is ignored, because the forge does
+not show it to the maintainer who applies the label. When an issue
+loses its label or closes, the next intake run deletes its queued
+task file, unless the task already has a run. GitLab works the same
+through `adapters/gitlab-issues.py`. The formats and failure rules
+are in `adapters/README.md`; the core never touches the network or
+holds a token.
+
+Two limits remain. The issue author can edit the body after the
+label is applied, and the next intake run picks up the edit: the
+label approves the author, not one version of the text. And if
+writing a task file fails partway through a run, the queue can hold
+some of that run's tasks and not others; run intake again once the
+cause is fixed.
+
+`prepare` records `source` in the run record. The GitHub delivery
+adapter then puts the source link in the pull request body, with
+`Closes #N` when the issue is in the same repo, so merging closes it.
+The title and criteria appear in the body inside a code block with
+issue references broken, so an issue author cannot close other
+issues or hide part of the body.
 
 ## Running several tasks at once
 

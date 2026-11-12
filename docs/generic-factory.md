@@ -1,6 +1,7 @@
 # Generic factory: one factory, many projects
 
-Status: steps 1 (project profile) and 2 (roles and skills) are built;
+Status: steps 1 (project profile), 2 (roles and skills) and 4 (intake)
+are built;
 the rest is a proposal.
 README.md describes what is enforced today.
 
@@ -129,12 +130,13 @@ so a review can tell which instructions a worker saw.
 Adapters stay separate programs that hold credentials. The core
 never imports one (this is unchanged).
 
-- **Intake** (`t12 intake --home H`) runs the profile's intake
-  adapter. The adapter writes task files in the task schema, each
-  with `source: {"adapter": "github-issues", "ref": "...", "url": "..."}`.
-  `prepare` admits them as it admits a hand-written task. Planned
-  adapters are `file`, `github-issues`, `gitlab-issues`, `jira`,
-  `linear`, and `asana`.
+- **Intake** is an adapter run as `adapters/<name>.py intake
+  --repo-config <profile> --out-dir <queue dir>`. It writes task
+  files in the task schema, each with
+  `source: {"adapter": "github-issues", "ref": "o/r#12", "url": "..."}`,
+  and never a profile-controlled key. `bin/t12-queue` admits them as
+  it admits a hand-written task. Built: `github-issues`,
+  `gitlab-issues`. Planned: `file`, `jira`, `linear`, `asana`.
 - **Delivery** keeps today's report schema and four outcomes. The
   `ADAPTERS` tuple is replaced by the profile's `delivery` list.
   `deliver` refuses an adapter the frozen profile does not name.
@@ -202,9 +204,13 @@ runs against a disposable repo, as the current tests do.
    `ADAPTERS`. GitLab and Bitbucket adapters, tested against fake
    HTTP servers with the existing outcome rules (a failed read is
    uncertain, never denied).
-4. **Intake adapters.** `t12 intake`, then a `source` ref carried
-   from the issue to the change request. GitHub issues and GitLab
-   issues first.
+4. **Intake adapters. Built.** Not `t12 intake`: intake adapters are
+   programs (`adapters/github-issues.py`, `adapters/gitlab-issues.py`)
+   that write task files into the queue directory, so the core stays
+   off the network. The profile's `intake` key sets their defaults,
+   and `source` goes from the issue into the run record and the
+   change-request body. The GitHub delivery adapter links it; the
+   GitLab and Bitbucket ones link it when step 3 lands.
 5. **Onboard chat-bridge.** Write its `.t12/project.json` from
    `chat-bridge/factory/paths.py` and its gate ladder. Run one real
    issue end to end. Then retire `chat-bridge/factory/` in a

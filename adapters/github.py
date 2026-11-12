@@ -10,6 +10,12 @@ Usage:
         --out report.json [--repo owner/name] [--title T] [--body B] \
         [--api-base https://api.github.com] [--timeout 10]
 
+The default body links the run's `source`: `Closes #N` when the task
+came from an issue in this same repo, else a plain `Source:` link. The
+task's title, criteria and manifest follow in code blocks, with issue
+references broken, because an issue author may have written them. An
+explicit --body is used as given.
+
 Token from GITHUB_TOKEN. Exit 0 means a report was written (whatever
 the outcome); non-zero means the adapter could not run at all.
 
@@ -30,8 +36,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    manifest_text, mutation_outcome, read_outcome, read_run, report,
-    request, write_report,
+    break_issue_refs, manifest_text, mutation_outcome, read_outcome, read_run,
+    report, request, source_lines, untrusted_block, write_report,
 )
 
 
@@ -67,14 +73,18 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
     base = run["base"]
     manifest = manifest_text(home, task_id)
     if body is None:
+        task = "\n".join([run["title"], "", "Acceptance criteria:",
+                          *(f"- {c}" for c in run.get("acceptance_criteria") or [])])
         body = (
-            f"{run['title']}\n\n"
             f"Candidate: {candidate}\n"
-            f"Acceptance criteria: {'; '.join(run.get('acceptance_criteria') or [])}\n"
-            + (f"\n{manifest}" if manifest else "")
+            + "".join(f"{line}\n" for line in source_lines(run.get("source"), "github-issues", repo))
+            + "\nThe task as written:\n\n" + untrusted_block(task)
+            + (f"\nManifest:\n\n{untrusted_block(manifest)}" if manifest else "")
         )
     if title is None:
-        title = run["title"]
+        # A squash merge makes the title a commit message on the default
+        # branch, where a closing keyword in it closes the issue.
+        title = break_issue_refs(run["title"])
 
     def fail(outcome, detail, ref=None):
         data = report("github", task_id, candidate, outcome, ref, detail)

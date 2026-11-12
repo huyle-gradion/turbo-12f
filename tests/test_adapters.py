@@ -9,6 +9,7 @@ READ is uncertain (state unknown), never denied or rejected; and a
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -19,6 +20,21 @@ from urllib.parse import urlparse, parse_qs
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CANDIDATE = "a" * 40
 OTHER_HEAD = "b" * 40
+
+
+def outside_fences(markdown):
+    """Lines of markdown that render as text, not inside a ``` fence."""
+    lines, fence = [], None
+    for line in markdown.split("\n"):
+        opener = re.match(r"^(`{3,})", line)
+        if fence:
+            if opener and line.strip() == "`" * len(line.strip()) and len(line.strip()) >= len(fence):
+                fence = None
+        elif opener:
+            fence = opener.group(1)
+        else:
+            lines.append(line)
+    return lines
 
 
 def make_verified_home(tmp, adapter_fields=None):
@@ -49,6 +65,7 @@ def make_verified_home(tmp, adapter_fields=None):
 class FakeGitHub(BaseHTTPRequestHandler):
     SCENARIO = {}
     REQUESTS = []
+    BODIES = []
 
     def log_message(self, *args):
         pass
@@ -98,7 +115,7 @@ class FakeGitHub(BaseHTTPRequestHandler):
     def do_POST(self):
         path, _ = self._route()
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        self.BODIES.append(json.loads(self.rfile.read(length) or b"null"))
         self.REQUESTS.append(("POST", path))
         scenario = self.SCENARIO
         if path == "/repos/o/r/pulls":
@@ -209,6 +226,7 @@ class GitHubAdapterCase(AdapterCase):
     def github(self, home, scenario=None, extra=None):
         FakeGitHub.SCENARIO = scenario or {}
         FakeGitHub.REQUESTS = []
+        FakeGitHub.BODIES = []
         out = os.path.join(self.tmp.name, "report.json")
         args = ["create-pr", "--home", home, "--task-id", "demo-1",
                 "--repo", "o/r", "--out", out, "--api-base", self.api_base]
@@ -225,6 +243,60 @@ class GitHubAdapterCase(AdapterCase):
         self.assertEqual(data["ref"], "https://github.example/pr/7")
         posts = [r for r in FakeGitHub.REQUESTS if r[0] == "POST"]
         self.assertEqual(len(posts), 1)
+
+    def pr_body(self, source, extra=None):
+        tmp = tempfile.mkdtemp(dir=self.tmp.name)
+        home = make_verified_home(tmp, {"github_repo": "o/r", "source": source})
+        self.github(home, extra=extra)
+        return FakeGitHub.BODIES[0]["body"]
+
+    def test_pr_body_closes_a_same_repo_issue_and_links_its_source(self):
+        url = "https://github.example/o/r/issues/12"
+        body = self.pr_body({"adapter": "github-issues", "ref": "o/r#12", "url": url})
+        self.assertIn("\nCloses #12\n", body)
+        self.assertIn(f"\nSource: {url}\n", body)
+
+    def test_pr_body_only_links_an_issue_from_elsewhere(self):
+        url = "https://gitlab.example/g/p/-/issues/3"
+        for source in ({"adapter": "gitlab-issues", "ref": "g/p#3", "url": url},
+                       {"adapter": "github-issues", "ref": "other/repo#3", "url": url}):
+            body = self.pr_body(source)
+            self.assertNotIn("Closes", body)
+            self.assertIn(f"Source: {url}", body)
+
+    def test_pr_body_without_a_source_is_unchanged(self):
+        home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
+        self.github(home)
+        self.assertNotIn("Source:", FakeGitHub.BODIES[0]["body"])
+
+    def test_task_text_in_the_pr_cannot_close_issues_or_hide_the_body(self):
+        tmp = tempfile.mkdtemp(dir=self.tmp.name)
+        url = "https://github.example/o/r/issues/12"
+        criteria = ["closes #42", "fixes owner/other#7", "<!-- the rest is hidden",
+                    "a ```` run cannot end the block"]
+        home = make_verified_home(tmp, {
+            "github_repo": "o/r", "title": "Fixes #41", "acceptance_criteria": criteria,
+            "source": {"adapter": "github-issues", "ref": "o/r#12", "url": url}})
+        with open(os.path.join(home, "evidence", "demo-1", "manifest.txt"), "w") as fh:
+            fh.write("turbo-12f manifest — task demo-1: Fixes #41\n  - <!-- hide\n")
+        self.github(home)
+        sent = FakeGitHub.BODIES[0]
+        body = sent["body"]
+        self.assertEqual(re.findall(r"#\d+", body), ["#12"])
+        self.assertIn("closes #\u206042", body)
+        self.assertIn("owner/other#\u20607", body)
+        visible = outside_fences(body)
+        self.assertIn("Closes #12", visible)
+        self.assertIn(f"Source: {url}", visible)
+        for line in visible:
+            for text in ("Fixes", "closes", "<!--", "````"):
+                self.assertNotIn(text, line)
+        self.assertIn("a ```` run cannot end the block", body)
+        self.assertEqual(sent["title"], "Fixes #\u206041")
+
+    def test_an_explicit_body_is_used_as_given(self):
+        source = {"adapter": "github-issues", "ref": "o/r#12"}
+        self.assertEqual(self.pr_body(source, ["--body", "mine"]), "mine")
 
     def test_existing_pr_matching_head_confirmed_without_create(self):
         home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
