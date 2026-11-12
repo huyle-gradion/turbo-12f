@@ -204,6 +204,18 @@ intake: {"adapter": "evil"}
         self.assertIn("skipped gh-1", result.stdout)
         self.assertEqual(self.task("gh-1.json")["title"], "by hand")
 
+    def test_a_planted_tmp_symlink_does_not_redirect_the_write(self):
+        os.makedirs(self.out)
+        victim = os.path.join(self.tmp.name, "victim.txt")
+        with open(victim, "w") as fh:
+            fh.write("keep me\n")
+        os.symlink(victim, os.path.join(self.out, ".gh-1.json.tmp"))
+        self.intake([issue(1)], ["--label", "factory"])
+        with open(victim) as fh:
+            self.assertEqual(fh.read(), "keep me\n")
+        self.assertEqual(self.task("gh-1.json")["id"], "gh-1")
+        self.assertFalse(os.path.islink(os.path.join(self.out, "gh-1.json")))
+
     def test_a_failed_listing_writes_nothing_and_fails(self):
         for status in (403, 500, 502):
             result = self.intake([issue(1)], ["--label", "factory"],

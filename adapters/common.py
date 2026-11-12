@@ -22,6 +22,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -314,10 +315,16 @@ def _write_if_changed(out_dir, task, adapter):
             return "skipped", f"{path} exists and was not written by {adapter}"
         if current == text:
             return "unchanged", path
-    tmp = os.path.join(out_dir, f".{task['id']}.json.tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=out_dir, prefix=f".{task['id']}.", suffix=".tmp")
+    try:
+        os.fchmod(fd, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
     return "wrote", path
 
 
