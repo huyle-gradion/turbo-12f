@@ -100,7 +100,8 @@ bin/t12 deliver --home <state-home> --task-id <id> \
 ```bash
 export GITHUB_TOKEN=...          # or GITLAB_TOKEN and GITLAB_URL
 python3 adapters/github-issues.py intake --out-dir <queue dir> \
-  [--repo-config repo/.t12/project.json] [--repo owner/name] \
+  [--repo-config repo/.t12/project.json | --trunk-repo repo --trunk main] \
+  [--repo owner/name] \
   [--label factory] [--home <state-home>] [--api-base https://api.github.com]
 python3 adapters/gitlab-issues.py intake --out-dir <queue dir> \
   [--repo-config ...] [--repo group/project] [--label factory] [--home ...]
@@ -119,7 +120,11 @@ the project path, subgroups included.
 (`{"adapter", "repo", "label"}`) supplies `--repo` and `--label`, and
 the adapter refuses a profile that names a different intake adapter.
 Point it at a checkout of trunk: `prepare` reads the profile from
-trunk, intake reads the file you give it. A label is required, from
+trunk, intake reads the file you give it. Or give
+`--trunk-repo PATH --trunk BRANCH` instead: intake then reads the
+`.t12/project.json` committed at the tip of BRANCH in the repository at
+PATH, ignoring uncommitted edits, and refuses a missing branch or
+profile. The two forms cannot be combined. A label is required, from
 either place: anyone can file an issue, and the label is what a
 maintainer applies to say the factory may work on it. Only issues
 that carry it are read, open ones only, and pull requests are

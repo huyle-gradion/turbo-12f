@@ -3,7 +3,8 @@
 
 Usage:
     python3 adapters/gitlab-issues.py intake --out-dir <queue dir> \
-        [--repo-config .t12/project.json] [--repo group/project] [--label L] \
+        [--repo-config .t12/project.json | --trunk-repo PATH --trunk BRANCH] \
+        [--repo group/project] [--label L] \
         [--home <state-home>]
 
 Token from GITLAB_TOKEN; the instance from GITLAB_URL (default

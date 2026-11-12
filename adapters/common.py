@@ -452,6 +452,9 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("intake")
     p.add_argument("--repo-config", help="path to .t12/project.json; its `intake` key sets defaults")
+    p.add_argument("--trunk-repo", help="git checkout whose --trunk branch carries .t12/project.json")
+    p.add_argument("--trunk", help="branch to read the committed .t12/project.json from, "
+                   "instead of --repo-config")
     p.add_argument("--out-dir", required=True, help="queue directory bin/t12-queue reads")
     p.add_argument("--home", help="state home; a task with a run there is left alone")
     p.add_argument("--repo", help="owner/name, overriding the profile")
@@ -465,7 +468,7 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
         print(f"error: {token_env} is not set", file=sys.stderr)
         return 2
     try:
-        profile = _intake_profile(args.repo_config, name)
+        profile = _intake_profile(args, name)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -486,14 +489,44 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
     return 0
 
 
-def _intake_profile(path, name):
-    if not path:
+PROFILE_PATH = ".t12/project.json"
+
+
+def _intake_profile(args, name):
+    if args.repo_config and (args.trunk or args.trunk_repo):
+        raise ValueError("give --repo-config or --trunk-repo/--trunk, not both")
+    if bool(args.trunk) != bool(args.trunk_repo):
+        raise ValueError("--trunk-repo and --trunk go together")
+    if args.trunk:
+        source = f"{PROFILE_PATH} on branch {args.trunk!r}"
+        text = _committed_profile(args.trunk_repo, args.trunk)
+    elif args.repo_config:
+        source = args.repo_config
+        try:
+            with open(args.repo_config, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise ValueError(f"cannot read {source}: {exc}") from exc
+    else:
         return {}
     try:
-        with open(path, encoding="utf-8") as fh:
-            intake = json.load(fh).get("intake") or {}
-    except (OSError, ValueError, AttributeError) as exc:
-        raise ValueError(f"cannot read {path}: {exc}") from exc
+        intake = json.loads(text).get("intake") or {}
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"cannot read {source}: {exc}") from exc
     if not isinstance(intake, dict) or intake.get("adapter") not in (None, name):
-        raise ValueError(f"{path} does not name {name!r} as its intake adapter")
+        raise ValueError(f"{source} does not name {name!r} as its intake adapter")
     return intake
+
+
+def _committed_profile(repo, branch):
+    """The committed .t12/project.json at the tip of BRANCH; the
+    working tree is never read."""
+    def git(*cmd):
+        return subprocess.run(["git", "-C", repo, *cmd], capture_output=True, text=True)
+    head = git("rev-parse", "--verify", "--quiet", "--end-of-options", f"refs/heads/{branch}")
+    if head.returncode != 0:
+        raise ValueError(f"branch {branch!r} does not exist in {repo}")
+    shown = git("show", f"{head.stdout.strip()}:{PROFILE_PATH}")
+    if shown.returncode != 0:
+        raise ValueError(f"branch {branch!r} in {repo} has no {PROFILE_PATH}")
+    return shown.stdout

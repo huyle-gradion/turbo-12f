@@ -329,6 +329,73 @@ intake: {"adapter": "evil"}
         self.intake([issue(4)], ["--repo-config", config], expect=2)
 
 
+def trunk_repo(path, committed, working=None):
+    """A git repo at PATH whose `main` carries COMMITTED as
+    .t12/project.json; WORKING, if given, is left uncommitted on top."""
+    os.makedirs(os.path.join(path, ".t12"))
+    profile = os.path.join(path, ".t12", "project.json")
+    with open(profile, "w") as fh:
+        json.dump(committed, fh)
+    for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.com"],
+                ["config", "user.name", "T"], ["add", "."], ["commit", "-qm", "profile"],
+                ["checkout", "-qb", "bare"], ["rm", "-q", ".t12/project.json"],
+                ["commit", "-qm", "no profile"], ["checkout", "-q", "main"]):
+        subprocess.run(["git", *cmd], cwd=path, check=True, capture_output=True)
+    if working is not None:
+        with open(profile, "w") as fh:
+            json.dump(working, fh)
+
+
+def github_profile(repo, label):
+    return {"version": 1, "intake": {"adapter": "github-issues", "repo": repo, "label": label}}
+
+
+class TrunkProfile(IntakeCase):
+    def test_the_profile_is_read_from_the_committed_trunk(self):
+        repo = os.path.join(self.tmp.name, "product")
+        trunk_repo(repo, github_profile("o/r", "factory"),
+                   working=github_profile("x/y", "uncommitted"))
+        self.intake([issue(4)], ["--trunk-repo", repo, "--trunk", "main"])
+        self.assertEqual(self.files(), ["gh-4.json"])
+        path, query = FakeIssues.REQUESTS[0]
+        self.assertEqual((path, query["labels"]), ("/repos/o/r/issues", "factory"))
+
+
+class TrunkProfileRefusals(unittest.TestCase):
+    """No issue server: each of these must fail before any listing."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = os.path.join(self.tmp.name, "queue")
+        self.repo = os.path.join(self.tmp.name, "product")
+        trunk_repo(self.repo, github_profile("o/r", "factory"))
+
+    def refused(self, *extra):
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", GITHUB_TOKEN="t")
+        result = subprocess.run(
+            ["python3", os.path.join(ROOT, "adapters", "github-issues.py"), "intake",
+             "--out-dir", self.out, "--api-base", "http://127.0.0.1:9", *extra],
+            capture_output=True, text=True, timeout=60, env=env)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("unrecognized arguments", result.stderr)
+        self.assertFalse(os.path.exists(self.out))
+        return result.stderr
+
+    def test_a_missing_branch_or_profile_is_named(self):
+        stderr = self.refused("--trunk-repo", self.repo, "--trunk", "no-such-branch")
+        self.assertIn("no-such-branch", stderr)
+        stderr = self.refused("--trunk-repo", self.repo, "--trunk", "bare")
+        self.assertIn("bare", stderr)
+        self.assertIn(".t12/project.json", stderr)
+
+    def test_repo_config_and_trunk_together_are_refused(self):
+        config = os.path.join(self.repo, ".t12", "project.json")
+        stderr = self.refused("--repo-config", config, "--trunk-repo", self.repo, "--trunk", "main")
+        self.assertIn("--repo-config", stderr)
+        self.assertIn("--trunk", stderr)
+
+
 class GitLabIntake(IntakeCase):
     def gitlab(self, issues, expect=0, scenario=None):
         FakeIssues.SCENARIO = dict(scenario or {}, issues=issues)
