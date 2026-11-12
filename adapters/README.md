@@ -209,10 +209,25 @@ run, so run it again from cron or when a task file lands in the queue.
 - Every other role step is a worker call. `t12 context` builds the
   prompt, the runner pipes it to `--model-cmd` in the run's worktree
   with `T12_TASK_ID`, `T12_ROLE`, `T12_SESSION` and `T12_WORKTREE`
-  set, and passes stdout to `t12 act`. The command must print only
-  the JSON tool call, and must be allowed to edit the worktree and run
-  `git commit` without a prompt. Each call gets a session id never
-  used before.
+  set, and passes the tool call in its reply to `t12 act`. The command
+  must be allowed to edit the worktree and run `git commit` without a
+  prompt. Each call gets a session id never used before.
+- The runner takes the tool call out of the reply one of two ways, and
+  `act` records which as `parsed_by`, with the whole reply as
+  `worker-raw-N.txt` evidence when it differs from the call:
+  - `schema`: for `claude` and `codex exec`, the runner adds the
+    role's JSON Schema (`t12 tool-schema`) to the command, and the CLI
+    holds the model to it while it writes. If the CLI exits with an
+    error in that mode, the runner calls it once more without the
+    schema.
+  - `extracted`: any other reply, or one with no structured result,
+    is searched for exactly one tool call, bare on its own line or in
+    a fence. A call printed twice counts once. Two calls that differ,
+    or none, pass the reply on unchanged as `raw`, and `act` rejects
+    it as before.
+
+  Other CLIs (`agy`, `gemini`) get no schema yet: `agy -p` takes the
+  prompt as an argument, not on stdin.
 - When `act` rejects the output, the runner sends the error back to
   the same session once, if the budget still has an operation left.
   A failed model call records nothing, and the next runner tries

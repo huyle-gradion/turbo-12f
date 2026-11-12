@@ -1139,6 +1139,9 @@ def cmd_escalate(args):
     return 0
 
 
+PARSED_BY = ("raw", "schema", "extracted")
+
+
 def cmd_act(args):
     """Factor 4: a worker's output is a tool call. Record it, validate it
     against the registry, then run the step it maps to. A malformed
@@ -1153,17 +1156,21 @@ def cmd_act(args):
         data = fh.read()
     seq = len(model.read_events(home, run["task_id"])) + 1
     ref = evidence.write_evidence(home, run["task_id"], f"worker-output-{seq}.json", data)
+    detail = {"role": args.role, "output": ref, "parsed_by": args.parsed_by}
+    if args.raw:
+        with open(args.raw, "rb") as fh:
+            detail["raw"] = evidence.write_evidence(
+                home, run["task_id"], f"worker-raw-{seq}.txt", fh.read())
     try:
         tool, targs = tools.parse(data.decode("utf-8", "replace"), kind)
         model.check_session(run, args.role, args.session)
     except StateError as exc:
         model.bump_op(run)
-        _save(home, run, "worker-output-rejected",
-              {"role": args.role, "output": ref, "error": str(exc)})
+        _save(home, run, "worker-output-rejected", {**detail, "error": str(exc)})
         raise
     if tool == "qa_report":
         model.bind_session(run, args.role, args.session)
-    _save(home, run, "worker-output", {"role": args.role, "tool": tool, "output": ref})
+    _save(home, run, "worker-output", {**detail, "tool": tool})
     step = dict(home=args.home, task_id=args.task_id, session=args.session, role=args.role)
     if tool == "red_test_ready":
         return cmd_red(argparse.Namespace(
@@ -1178,6 +1185,12 @@ def cmd_act(args):
         return cmd_escalate(argparse.Namespace(
             home=args.home, task_id=args.task_id, question=targs["question"]))
     print(f"{tool}: recorded for {args.role}")
+    return 0
+
+
+def cmd_tool_schema(args):
+    run = _run(_home(args), args.task_id)
+    print(json.dumps(tools.json_schema(model.role_kind(run, args.role))))
     return 0
 
 
@@ -1291,7 +1304,18 @@ def build_parser():
     p.add_argument("--role", required=True, help="a role of the run")
     p.add_argument("--session", required=True, help="the host's id for the worker session that produced the output")
     p.add_argument("--input", required=True, help="the worker's JSON output (stored as evidence)")
+    p.add_argument("--raw", help="the model's whole reply, when --input was taken out of it "
+                                 "(stored as evidence)")
+    p.add_argument("--parsed-by", choices=PARSED_BY, default="raw",
+                   help="how the host got --input from the reply: raw (it is the reply), "
+                        "schema (the model CLI enforced the tool-call schema) or extracted "
+                        "(the one tool call found in the reply's text)")
     p.set_defaults(func=cmd_act)
+
+    p = sub.add_parser("tool-schema", help="JSON Schema of one tool call for a role of the run")
+    p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
+    p.add_argument("--role", required=True)
+    p.set_defaults(func=cmd_tool_schema)
 
     return parser
 

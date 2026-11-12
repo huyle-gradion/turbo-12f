@@ -10,7 +10,8 @@ from .errors import StateError
 
 STR = "string"
 STR_LIST = "list of strings"
-OBJ_LIST = "list of objects"
+FINDINGS = "list of findings"
+FINDING_FIELDS = ("id", "class", "severity", "where", "finding", "owner")
 ARGV = "non-empty list of strings"
 
 ESCALATE = {"escalate": {"question": STR}}
@@ -33,7 +34,7 @@ TOOLS = {
     },
     "review": {
         "review": {"verdict": ("merge-ready", "blocked", "human-gated", "unverified"),
-                   "findings": OBJ_LIST, "verification": STR},
+                   "findings": FINDINGS, "verification": STR},
         **ESCALATE,
     },
 }
@@ -52,7 +53,7 @@ def _check(name, value, kind):
         ok = ok and (kind == STR_LIST or value != [])
         return None if ok else f"{name} must be a {kind}"
     ok = isinstance(value, list) and all(isinstance(v, dict) for v in value)
-    return None if ok else f"{name} must be a {OBJ_LIST}"
+    return None if ok else f"{name} must be a list of objects"
 
 
 def parse(text, kind):
@@ -88,3 +89,35 @@ def schema_for(kind):
                                 for k, v in spec.items()}}
         for name, spec in TOOLS[kind].items()
     ]
+
+
+def _arg_schema(shape):
+    if isinstance(shape, tuple):
+        return {"type": "string", "enum": list(shape)}
+    if shape == STR:
+        return {"type": "string", "minLength": 1}
+    if shape == FINDINGS:
+        finding = {"type": "object", "additionalProperties": False,
+                   "required": list(FINDING_FIELDS),
+                   "properties": {f: {"type": "string"} for f in FINDING_FIELDS}}
+        return {"type": "array", "items": finding}
+    return {"type": "array", "items": {"type": "string"},
+            **({"minItems": 1} if shape == ARGV else {})}
+
+
+def json_schema(kind):
+    """A JSON Schema for one tool call of this kind, for model CLIs that
+    enforce a schema while the model writes. Agent CLIs refuse a schema
+    whose root is not an object, so `tool` and `args` are not tied to
+    each other here; parse() still checks the pairing."""
+    return {
+        "type": "object", "additionalProperties": False, "required": ["tool", "args"],
+        "properties": {
+            "tool": {"type": "string", "enum": sorted(TOOLS[kind])},
+            "args": {"anyOf": [
+                {"type": "object", "additionalProperties": False, "required": list(spec),
+                 "properties": {k: _arg_schema(v) for k, v in spec.items()}}
+                for spec in TOOLS[kind].values()
+            ]},
+        },
+    }
