@@ -1312,6 +1312,54 @@ class CliCase(unittest.TestCase):
         result = self.t12("prepare", "--home", home, "--task", task, expect=1)
         self.assertIn(".t12/policy.json is no longer read", result.stderr)
 
+    def test_a_dep_reached_through_a_committed_symlink_is_refused(self):
+        os.makedirs(os.path.join(self.repo, "guards"))
+        with open(os.path.join(self.repo, "guards", "test_guard.py"), "w") as fh:
+            fh.write("import unittest\n\nclass G(unittest.TestCase):\n"
+                     "    def test_fails(self):\n        self.fail('guard')\n")
+        with open(os.path.join(self.repo, ".gitignore"), "w") as fh:
+            fh.write("__pycache__/\n")
+        self.commit_profile(protected_paths=["guards"], verify_deps=["a/__pycache__"])
+        home, task = self.prepare_custom("demo-link", verify_deps=["a/__pycache__"])
+        self.t12("prepare", "--home", home, "--task", task)
+        os.makedirs(os.path.join(home, "worktrees", "demo-link", "a", "__pycache__"))
+        wt = self.red_then_implement(home, "demo-link")
+        shutil.rmtree(os.path.join(wt, "a"))
+        os.symlink("guards", os.path.join(wt, "a"))
+        os.makedirs(os.path.join(wt, "guards", "__pycache__"))
+        self._git(wt, "add", "a")
+        self._git(wt, "commit", "-qm", "chore: link a to guards")
+        self.t12("stage", "--home", home, "--task-id", "demo-link", "--session", "sess-builder")
+        result = self.t12("gate", "--home", home, "--task-id", "demo-link", "--name", "unit",
+                          "--session", "sess-qa", expect=1)
+        self.assertIn("sits under a symlink", result.stderr)
+
+    def test_a_base_unrelated_to_trunk_is_refused_at_prepare(self):
+        self._git(self.repo, "switch", "-q", "--orphan", "stray")
+        with open(os.path.join(self.repo, "x.txt"), "w") as fh:
+            fh.write("x\n")
+        self._git(self.repo, "add", "x.txt")
+        self._git(self.repo, "commit", "-qm", "stray")
+        self._git(self.repo, "switch", "-qf", "main")
+        home, task = self.prepare_custom("demo-orphan", base="stray")
+        result = self.t12("prepare", "--home", home, "--task", task, expect=1)
+        self.assertIn("shares no history with trunk", result.stderr)
+
+    def test_init_will_not_switch_the_trunk_of_a_state_home(self):
+        self._git(self.repo, "branch", "develop")
+        home = os.path.join(self.tmp.name, "home-trunk")
+        self.t12("init", "--home", home, "--repo", self.repo, "--trunk", "develop")
+        result = self.t12("init", "--home", home, "--repo", self.repo, expect=1)
+        self.assertIn("already follows trunk 'develop'", result.stderr)
+
+    def test_a_tag_named_like_the_trunk_does_not_choose_the_profile(self):
+        before_profile = self._git(self.repo, "rev-parse", "HEAD")
+        self.commit_profile(protected_paths=["guards"])
+        self._git(self.repo, "tag", "main", before_profile)
+        home, task = self.prepare_custom("demo-tag")
+        self.t12("prepare", "--home", home, "--task", task)
+        self.assertEqual(self.run_record(home, "demo-tag")["protected_paths"], ["guards"])
+
     def test_a_task_cannot_loosen_the_profile(self):
         self.commit_profile(required_reviews=["reviewer"], protected_paths=["guards"])
         home, task = self.prepare_custom("demo-loose", protected_paths=[])

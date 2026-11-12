@@ -240,6 +240,27 @@ class ProfileTest(unittest.TestCase):
             with self.assertRaises(StateError, msg=bad):
                 profile.apply(base, bad)
 
+    def test_a_profile_that_lists_no_deps_allows_none(self):
+        with self.assertRaises(StateError):
+            profile.apply(self.profile(), {"verify_deps": [".venv"]})
+        self.assertEqual(profile.apply(profile.parse(None), {"verify_deps": [".venv"]})
+                         ["verify_deps"], [".venv"])
+
+    def test_a_dep_beside_a_protected_file_is_refused(self):
+        base = self.profile(protected_paths=["guards/test_guard.py"],
+                            verify_deps=["guards/__pycache__", ".venv"])
+        with self.assertRaises(StateError):
+            profile.apply(base, {"verify_deps": ["guards/__pycache__"]})
+        root_file = self.profile(protected_paths=["AGENTS.md"], verify_deps=[".venv"])
+        self.assertEqual(profile.apply(root_file, {})["verify_deps"], [".venv"])
+
+    def test_a_mistyped_list_entry_is_a_clear_error(self):
+        base = self.profile(gates=[self.GATE], verify_deps=[".venv"])
+        for bad in ({"verify_deps": [1]}, {"gates": [1]}, {"gates": [{"name": ["x"]}]},
+                    {"required_reviews": [None]}):
+            with self.assertRaises(StateError, msg=bad):
+                profile.apply(base, bad)
+
     def test_the_task_sets_its_own_budget(self):
         merged = profile.apply(self.profile(op_limit=9), {"op_limit": 40})
         self.assertEqual(merged["op_limit"], 40)

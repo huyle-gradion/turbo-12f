@@ -171,8 +171,10 @@ file only says what is unique to it:
 }
 ```
 
-`prepare` reads the profile from the trunk the state home names
-(`t12 init --trunk`, default `main`), never from the task's `base` or
+`prepare` reads the profile from the trunk branch the state home names
+(`t12 init --trunk`, default `main`; a tag of the same name does not
+count, and a state home cannot switch trunks), never from the task's
+`base` or
 the worktree, and stores the merged task in the run. A task cannot
 pick an older commit or another run's branch to get weaker rules, and
 a candidate that edits the profile changes nothing for its own run.
@@ -188,7 +190,7 @@ may come from an issue tracker:
 | `required_reviews` | Both lists apply |
 | `require_probes` | On if either turns it on |
 | `sandbox_adapter`, `sandbox_image` | Refused unless equal |
-| `verify_deps` | The task may only narrow the profile's list |
+| `verify_deps` | The task may only narrow the profile's list; a profile without one allows none |
 | budgets | The task wins |
 | `protected_paths`, `security_review_paths` | Profile only; a task may not set them |
 
@@ -196,7 +198,10 @@ may come from an issue tracker:
 from both the task's base and the point where the candidate leaves
 trunk, so a base carrying another run's unreviewed edit cannot hide
 it. A move out of a protected path counts as a change to it. A
-`verify_deps` entry may not overlap a protected path. Deps still come
+`verify_deps` entry may not overlap a protected path or sit in the
+folder of a protected file, and a dep reached through a symlink the
+candidate commits is refused at the gate. A base with no history in
+common with trunk is refused at `prepare`. Deps still come
 from the builder's worktree, so a builder can put code in `.venv` or
 `node_modules` that a gate runs; the profile does not close that.
 

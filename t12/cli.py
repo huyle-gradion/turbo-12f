@@ -106,6 +106,10 @@ def _link_deps(run, wt, checkout):
             raise StateError(f"declared dependency {dep} is tracked in the commit; "
                              "verify_deps must name untracked paths")
         os.makedirs(os.path.dirname(target), exist_ok=True)
+        expected = os.path.join(os.path.realpath(checkout), os.path.dirname(os.path.normpath(dep)))
+        if os.path.realpath(os.path.dirname(target)) != os.path.normpath(expected):
+            raise StateError(f"declared dependency {dep} sits under a symlink in the commit; "
+                             "verify_deps must name plain paths")
         real.append(os.path.realpath(source))
         os.symlink(real[-1], target)
     return real
@@ -233,7 +237,7 @@ def cmd_init(args):
     for sub in ("", "runs", "evidence", "worktrees"):
         store.mkdir_private(os.path.join(home, sub))
     config_path = os.path.join(home, "config.json")
-    gitio.rev_parse(repo, args.trunk)
+    gitio.rev_parse(repo, f"refs/heads/{args.trunk}")
     config = {"version": model.VERSION, "repo": repo, "trunk": args.trunk,
               "created_at": time.time()}
     if os.path.exists(config_path):
@@ -241,6 +245,11 @@ def cmd_init(args):
         if existing.get("repo") != repo:
             raise StateError(
                 f"state home already bound to {existing.get('repo')}, not {repo}"
+            )
+        if existing.get("trunk", "main") != args.trunk:
+            raise StateError(
+                f"state home already follows trunk {existing.get('trunk', 'main')!r}, "
+                f"not {args.trunk!r}; use a new state home to change it"
             )
     store.save_json(config_path, config)
     print(f"init: repo={repo} trunk={args.trunk} home={home}")
@@ -265,7 +274,9 @@ def _admit(home, repo, trunk, task, task_id, supersede):
     # The rules come from the trunk the state home names, never from the
     # task's base: a task file could point base at a commit, or another
     # run's branch, whose profile is weaker or missing.
-    trunk_commit = gitio.rev_parse(repo, trunk)
+    trunk_commit = gitio.rev_parse(repo, f"refs/heads/{trunk}")
+    if not gitio.git_ok_bool(repo, "merge-base", trunk_commit, base_commit):
+        raise StateError(f"base {base!r} shares no history with trunk {trunk!r}")
     if gitio.file_at(repo, trunk_commit, profile_mod.LEGACY_PATH) is not None:
         raise StateError(f"{profile_mod.LEGACY_PATH} is no longer read; move its "
                          f"security_review_paths into {profile_mod.PATH} on {trunk}")

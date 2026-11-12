@@ -117,12 +117,23 @@ def parse(text):
             _check_type(PATH, key, data[key], kind)
     for key in SCOPE_KEYS:
         data[key] = _paths(key, data.get(key, []))
+    # A profile that lists no deps allows none: otherwise a task's list
+    # would win outright, and deps load from the builder's worktree.
+    data.setdefault("verify_deps", [])
     return data
+
+
+ELEMENTS = {"gates": dict, "required_reviews": str, "verify_deps": str}
 
 
 def _check_type(where, key, value, kind):
     if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
         raise StateError(f"{where}: {key} must be a {kind.__name__}")
+    element = ELEMENTS.get(key)
+    if element and not all(isinstance(v, element) for v in value):
+        raise StateError(f"{where}: every {key} entry must be a {element.__name__}")
+    if key == "gates" and not all(isinstance(g.get("name"), str) and g["name"] for g in value):
+        raise StateError(f"{where}: every gate needs a non-empty string name")
 
 
 def apply(profile, task):
@@ -138,9 +149,15 @@ def apply(profile, task):
         if key not in profile:
             continue
         merged[key] = merge(profile[key], task[key]) if key in task else profile[key]
+    # A dep beside a protected file can shadow it too, as a __pycache__
+    # next to a protected test does, so each protected path's folder
+    # counts. Root-level files are the exception: their folder is the
+    # whole repo.
+    roots = set(profile["protected_paths"])
+    roots |= {os.path.dirname(p) for p in profile["protected_paths"] if os.path.dirname(p)}
     for dep in merged.get("verify_deps", []):
-        for root in profile["protected_paths"]:
-            dep_path = os.path.normpath(dep)
+        dep_path = os.path.normpath(dep)
+        for root in sorted(roots):
             if dep_path == root or dep_path.startswith(root + os.sep) or root.startswith(dep_path + os.sep):
                 raise StateError(f"verify_deps entry {dep!r} overlaps protected path {root!r}")
     return merged
