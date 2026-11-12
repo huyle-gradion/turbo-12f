@@ -798,6 +798,35 @@ class CliCase(unittest.TestCase):
         self.t12("init", "--home", home, "--repo", self.repo)
         return home, path
 
+    def test_gates_run_git_when_the_host_sets_xdg_config_home(self):
+        host_config = os.path.join(self.tmp.name, "host-config")
+        os.makedirs(os.path.join(host_config, "git"))
+        with open(os.path.join(host_config, "git", "config"), "w") as fh:
+            fh.write("[user]\n\tname = Host\n")
+        check = ("import os, subprocess, sys, tempfile; "
+                 "assert os.environ['XDG_CONFIG_HOME'].startswith(os.environ['HOME']); "
+                 "sys.exit(subprocess.run(['git', 'init', '-q', tempfile.mkdtemp()]).returncode)")
+        home, task = self.prepare_custom("demo-xdg", gates=[
+            {"name": "unit", "command": ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]},
+            {"name": "git", "command": ["python3", "-c", check]}])
+        env = {"XDG_CONFIG_HOME": host_config}
+        self.t12("prepare", "--home", home, "--task", task, extra_env=env)
+        wt = os.path.join(home, "worktrees", "demo-xdg")
+        with open(os.path.join(wt, "tests", "test_greet.py"), "w") as fh:
+            fh.write(TEST_FILE)
+        self.t12("red", "--home", home, "--task-id", "demo-xdg",
+                 "--test-path", "tests/test_greet.py",
+                 "--command", "python3 -m unittest tests.test_greet -q",
+                 "--marker", "FAILED", "--session", "sess-test-writer", extra_env=env)
+        with open(os.path.join(wt, "app.py"), "w") as fh:
+            fh.write(APP_V2)
+        self._git(wt, "commit", "-qam", "feat: implement greet")
+        self.t12("stage", "--home", home, "--task-id", "demo-xdg", "--session", "sess-builder",
+                 extra_env=env)
+        for name in ("unit", "git"):
+            self.t12("gate", "--home", home, "--task-id", "demo-xdg", "--name", name,
+                     "--session", "sess-qa", extra_env=env)
+
     def test_verify_deps_reach_gates_read_only(self):
         home, task = self.prepare_custom("demo-deps", verify_deps=["vendor"])
         self.t12("prepare", "--home", home, "--task", task)
