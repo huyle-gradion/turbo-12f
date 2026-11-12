@@ -95,6 +95,7 @@ merge — a human merges.
 | `verify` | Audit the run: event chain, evidence hashes, exit codes, HEAD, manifest |
 | `probe` | Run the safety probes; exit 0 only if every probe passes |
 | `deliver` | Record an adapter's report as evidence: `--adapter github\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
+| `board` | One row per run: phase, candidate, budget left, whether a command is running on it, and who acts next (`--json` for scripts) |
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
 | `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |

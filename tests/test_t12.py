@@ -3,6 +3,7 @@ no credentials. Each test builds a disposable product repo and drives
 the real CLI end to end.
 """
 
+import fcntl
 import json
 import os
 import shutil
@@ -995,6 +996,45 @@ class CliCase(unittest.TestCase):
         self.t12("verify", "--home", self.home, "--task-id", "demo-1")
         self.assertEqual(self.event_types().count("worker-output-rejected"), len(rejected))
         self.assertEqual(self.run_record()["budgets"]["ops_used"], len(rejected))
+
+    def board(self):
+        rows = json.loads(self.t12("board", "--home", self.home, "--json").stdout)
+        return {row["task_id"]: row for row in rows}
+
+    def test_board_shows_every_run_and_what_it_waits_on(self):
+        with open(self.task_path, "w") as fh:
+            json.dump(task_dict(task_id="demo-2"), fh)
+        self.t12("prepare", "--home", self.home, "--task", self.task_path)
+        self.do_red()
+        self.t12("escalate", "--home", self.home, "--task-id", "demo-2", "--question", "Which locale?")
+        rows = self.board()
+        self.assertEqual(rows["demo-1"]["phase"], "red")
+        self.assertEqual(rows["demo-1"]["next"], "builder: stage")
+        self.assertEqual(rows["demo-1"]["ops_left"], 49)
+        self.assertEqual(rows["demo-2"]["next"], "human: answer 'Which locale?'")
+        self.assertFalse(rows["demo-1"]["busy"])
+
+        self.do_implement_and_stage()
+        self.assertEqual(self.board()["demo-1"]["next"], "qa: gate unit")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit", "--session", "sess-qa")
+        self.assertEqual(self.board()["demo-1"]["next"], "replay")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        self.assertEqual(self.board()["demo-1"]["next"], "reviewer: review")
+        self.do_review()
+        self.assertEqual(self.board()["demo-1"]["next"], "green")
+
+        lock = os.open(os.path.join(self.home, "runs", "demo-1.lock"), os.O_RDWR)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertTrue(self.board()["demo-1"]["busy"])
+            result = self.t12("stop", "--home", self.home, "--task-id", "demo-1",
+                              "--reason", "x", expect=1)
+            self.assertIn("is busy", result.stderr)
+        finally:
+            os.close(lock)
+        text = self.t12("board", "--home", self.home).stdout
+        self.assertIn("demo-2", text)
+        self.assertIn("human: answer", text)
 
     def test_two_tasks_run_at_the_same_time(self):
         task = task_dict(task_id="demo-2")

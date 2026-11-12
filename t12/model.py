@@ -62,22 +62,51 @@ def events_path(home, task_id):
     return os.path.join(home, "runs", f"{task_id}.events.jsonl")
 
 
+# Long enough to outlast `board` probing the lock, short enough that a
+# command queued behind a running gate still fails fast.
+LOCK_WAIT_S = 2.0
+
+
+def lock_path(home, task_id):
+    return os.path.join(home, "runs", f"{task_id}.lock")
+
+
+def is_busy(home, task_id):
+    """True while another command holds the run's lock."""
+    try:
+        fd = os.open(lock_path(home, task_id), os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
 @contextlib.contextmanager
 def run_lock(home, task_id):
     """Hold the run's lock for one command. The kernel releases it when
     the process exits, so a crashed command never leaves it held."""
     if not isinstance(task_id, str) or not TASK_ID_RE.match(task_id):
         raise StateError(f"task id must match {TASK_ID_RE.pattern}: {task_id!r}")
-    path = os.path.join(home, "runs", f"{task_id}.lock")
+    path = lock_path(home, task_id)
     if not os.path.isdir(os.path.dirname(path)):
         raise StateError(f"no turbo-12f state home at {home}; run `init` first")
     fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    deadline = time.monotonic() + LOCK_WAIT_S
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise StateError(f"run {task_id!r} is busy: another t12 command holds "
-                             f"{path}; retry when it finishes") from None
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateError(f"run {task_id!r} is busy: another t12 command holds "
+                                     f"{path}; retry when it finishes") from None
+                time.sleep(0.05)
         yield
     finally:
         os.close(fd)
@@ -153,6 +182,41 @@ def check_reviews(run):
                 f"green blocked: the latest {role} review on {candidate[:12]} "
                 f"is {review['verdict']!r}"
             )
+
+
+def next_step(run):
+    """Who acts next on this run, and on what, as one short line."""
+    phase = run["phase"]
+    if phase == "ready":
+        return "test-writer: red"
+    if phase == "red":
+        return "builder: stage"
+    if phase == "gates":
+        for gate in run["gates"]:
+            if gate["status"] == "failed":
+                return f"builder: repair gate {gate['name']}"
+            if gate["status"] != "passed":
+                return f"qa: gate {gate['name']}"
+        return "replay"
+    if phase == "green":
+        commit = run["candidate"]["commit"]
+        for role in run.get("required_reviews") or []:
+            review = latest_review(run, role, commit=commit)
+            if review is None:
+                return f"{role}: review"
+            if review["verdict"] != "approve":
+                return f"builder: changes requested by {role}"
+        return "green"
+    if phase == "local-verified":
+        return "human: merge"
+    if phase == "paused":
+        pending = open_escalation(run)
+        if pending:
+            return f"human: answer {pending['question']!r}"
+        return f"human: resume (was {run['prior_phase']})"
+    if phase == "stopped":
+        return f"stopped: {run['stop_reason']}"
+    return "prepare"
 
 
 def void_reviews(run, reason):
