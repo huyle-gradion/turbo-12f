@@ -17,6 +17,9 @@ map, and `CONTEXT.md` for truth boundaries.
 Python standard library only. No network, no credentials, no model
 calls in the core or the tests.
 
+To have your coding agent run the factory on your repo for you, give
+it `docs/operator-agent.md`.
+
 ## Quick start
 
 ```sh
