@@ -105,7 +105,8 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
         return done("rejected", f"branch {branch!r} is at {tip[:12]}, not the reviewed "
                     f"head {candidate[:12]}; push the reviewed head")
 
-    query = urlencode({"state": "OPEN", "q": f'source.branch.name="{branch}"'})
+    query = urlencode({"state": "OPEN", "q": f'source.branch.name="{branch}" AND '
+                                             f'destination.branch.name="{run["base"]}"'})
     status, listing, error = request(
         "GET", f"{api}/pullrequests?{query}", token, timeout=timeout)
     if status != 200 or not isinstance(listing, dict) or not isinstance(listing.get("values"), list):

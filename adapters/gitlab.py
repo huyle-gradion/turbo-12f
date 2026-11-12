@@ -76,7 +76,8 @@ def create_mr(home, task_id, project, title, body, base_url, timeout, token):
         return done(outcome, f"could not check remote branch: {detail}")
 
     status, listing, error = request(
-        "GET", f"{api}/merge_requests?state=opened&source_branch={encoded_branch}",
+        "GET", f"{api}/merge_requests?state=opened&source_branch={encoded_branch}"
+               f"&target_branch={quote(run['base'], safe='')}",
         token, timeout=timeout)
     if status != 200 or not isinstance(listing, list):
         outcome, detail = read_outcome(status, error)

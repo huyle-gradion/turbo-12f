@@ -84,7 +84,7 @@ class FakeGitHub(BaseHTTPRequestHandler):
             if scenario.get("list_status"):
                 return self._json(scenario["list_status"], {"message": "boom"})
             existing = scenario.get("existing_pr")
-            if existing:
+            if existing and query.get("base", [existing.get("target", "main")])[0] == existing.get("target", "main"):
                 return self._json(200, [{"number": existing["number"],
                                          "html_url": f"https://github.example/pr/{existing['number']}"}])
             return self._json(200, [])
@@ -98,7 +98,8 @@ class FakeGitHub(BaseHTTPRequestHandler):
             return self._json(200, {"number": number,
                                     "html_url": f"https://github.example/pr/{number}",
                                     "head": {"sha": head},
-                                    "base": {"ref": scenario.get("target", "main")}})
+                                    "base": {"ref": scenario.get(
+                                        "target", (scenario.get("existing_pr") or {}).get("target", "main"))}})
         return self._json(404, {"message": "not found"})
 
     def do_POST(self):
@@ -156,7 +157,9 @@ class FakeGitLab(JsonHandler):
             if scenario.get("list_status"):
                 return self._json(scenario["list_status"], {"message": "boom"})
             existing = scenario.get("existing")
-            if existing and query.get("source_branch") == ["factory/demo-1"]:
+            if (existing and query.get("source_branch") == ["factory/demo-1"]
+                    and query.get("target_branch", [existing.get("target", "main")])
+                    == [existing.get("target", "main")]):
                 return self._json(200, [{"iid": existing["number"]}])
             return self._json(200, [])
         if path.startswith(f"{self.PROJECT}/merge_requests/"):
@@ -211,7 +214,10 @@ class FakeBitbucket(JsonHandler):
             if scenario.get("list_status"):
                 return self._json(scenario["list_status"], {"type": "error", "error": {"message": "boom"}})
             existing = scenario.get("existing")
-            if existing and 'source.branch.name="factory/demo-1"' in query.get("q", [""])[0]:
+            q = query.get("q", [""])[0]
+            if (existing and 'source.branch.name="factory/demo-1"' in q
+                    and ("destination.branch.name" not in q
+                         or f'destination.branch.name="{existing.get("target", "main")}"' in q)):
                 return self._json(200, {"values": [{"id": existing["number"]}]})
             return self._json(200, {"values": []})
         if path.startswith(f"{self.REPO}/pullrequests/"):
@@ -380,6 +386,12 @@ class GitHubAdapterCase(AdapterCase):
         data, _ = self.github(home, {"branch_missing": True, "project_missing": True})
         self.assertEqual(data["outcome"], "uncertain")
 
+    def test_a_pr_to_another_base_does_not_shadow_delivery(self):
+        home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
+        data, _ = self.github(home, {"existing_pr": {"number": 3, "head": CANDIDATE,
+                                                     "target": "release"}})
+        self.assertEqual(data["outcome"], "confirmed")
+
     def test_existing_pr_on_another_base_rejected(self):
         home = make_verified_home(self.tmp.name, {"github_repo": "o/r"})
         data, _ = self.github(home, {"existing_pr": {"number": 3, "head": CANDIDATE},
@@ -533,6 +545,12 @@ class ForgeContract:
         data, _ = self.forge(self.home(), {"branch_missing": True, "project_missing": True})
         self.assertEqual(data["outcome"], "uncertain")
         self.assertEqual(self.posts(), [])
+
+    def test_a_pr_to_another_target_does_not_shadow_delivery_to_base(self):
+        data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": self.same_head(),
+                                                        "target": "release"}})
+        self.assertEqual(data["outcome"], "confirmed")
+        self.assertEqual(len(self.posts()), 1)
 
     def test_existing_same_head_on_another_target_rejected(self):
         data, _ = self.forge(self.home(), {"existing": {"number": 3, "head": self.same_head()},

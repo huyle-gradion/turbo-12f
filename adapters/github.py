@@ -26,6 +26,7 @@ import argparse
 import os
 import re
 import sys
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
@@ -79,7 +80,8 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
 
     # 2. A PR for this branch may already exist — find it, do not duplicate.
     status, listing, error = request(
-        "GET", f"{api_base}/repos/{repo}/pulls?state=open&head={repo.split('/')[0]}:{branch}",
+        "GET", f"{api_base}/repos/{repo}/pulls?state=open&head={repo.split('/')[0]}:{branch}"
+               f"&base={quote(base, safe='')}",
         token, timeout=timeout)
     if status != 200 or not isinstance(listing, list):
         outcome, detail = read_outcome(status, error)
