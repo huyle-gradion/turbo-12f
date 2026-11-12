@@ -7,6 +7,8 @@ import fcntl
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -788,6 +790,98 @@ class CliCase(unittest.TestCase):
         blob = json.dumps(prior)
         self.assertNotIn("LONG-VERIFICATION-LOG", blob)
         self.assertLess(len(blob), 20000)
+
+    PLANTED_SUMMARY = "ZEBRA-7731 builder swears every edge case is handled"
+
+    @staticmethod
+    def holds(node, value):
+        """True when value appears anywhere in node (a command may be
+        given as its argv list or as one shell string)."""
+        if node == value or (isinstance(value, list) and node in (" ".join(value), shlex.join(value))):
+            return True
+        if isinstance(node, dict):
+            return any(CliCase.holds(v, value) for v in node.values())
+        if isinstance(node, list):
+            return any(CliCase.holds(v, value) for v in node)
+        return False
+
+    def assert_observed(self, entry, command, exit_code, commit, sha256, what):
+        self.assertIsNotNone(entry, f"reviewer context has no {what}")
+        for label, value in (("command", command), ("exit code", exit_code),
+                             ("commit", commit), ("evidence sha256", sha256)):
+            self.assertTrue(self.holds(entry, value), f"{what} lacks its {label} {value!r}: {entry}")
+
+    def gate_entry(self, context, name="unit"):
+        return next((g for g in context["gates"] if g.get("name") == name), None)
+
+    def test_review_prompts_do_not_ask_for_the_builders_summary(self):
+        for rel in ("prompts/reviewer.md", "skills/reviewer/SKILL.md"):
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                text = " ".join(fh.read().split())
+            self.assertIsNone(re.search(r"builder'?s?\W+(summary|claims)", text, re.I), rel)
+            self.assertIsNone(re.search(r"read the [\w' ]{0,20}summary", text, re.I), rel)
+        with open(os.path.join(ROOT, "prompts/security.md"), encoding="utf-8") as fh:
+            self.assertIn("Read the diff, not the summary", fh.read())
+
+    def test_reviewer_context_passes_observed_results_not_the_builders_summary(self):
+        self.do_red()
+        self.write_worktree("app.py", APP_V2)
+        self.commit_worktree("feat: implement greet")
+        self.act("builder", "sess-builder", {"tool": "implementation_ready",
+                                             "args": {"summary": self.PLANTED_SUMMARY}})
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        run = self.run_record()
+        commit = run["candidate"]["commit"]
+
+        out = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                       "--role", "reviewer", "--phase", "green").stdout
+        self.assertNotIn("ZEBRA-7731", out, "reviewer context leaks the builder's summary")
+        context = json.loads(out.split("--- context (JSON) ---\n", 1)[1])
+
+        gate = run["gates"][0]
+        self.assert_observed(self.gate_entry(context), gate["command"], 0, commit,
+                             gate["observation"]["sha256"], "gate 'unit'")
+        replay = run["replay"]
+        self.assert_observed(context.get("replay"), replay["command"], 0, commit,
+                             replay["output"]["sha256"], "replay")
+
+        # The summary stays in evidence, byte-for-byte, for human auditors.
+        with open(os.path.join(self.home, "runs", "demo-1.events.jsonl")) as fh:
+            events = [json.loads(line) for line in fh if line.strip()]
+        ref = next(e["detail"]["output"] for e in events
+                   if e["type"] == "worker-output" and e["detail"].get("tool") == "implementation_ready")
+        with open(ref["path"], "rb") as fh:
+            data = fh.read()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), ref["sha256"])
+        self.assertEqual(json.loads(data)["args"]["summary"], self.PLANTED_SUMMARY)
+
+    def test_reviewer_context_drops_results_of_a_superseded_candidate(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        old = self.run_record()
+        old_commit = old["candidate"]["commit"]
+        old_shas = [old["gates"][0]["observation"]["sha256"], old["replay"]["output"]["sha256"]]
+
+        self.write_worktree("app.py", APP_V2 + "# second candidate\n")
+        self.commit_worktree("fix: second candidate")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1",
+                 "--name", "unit", "--session", "sess-qa")
+        new = self.run_record()
+
+        context = self.reviewer_context()
+        gate = self.gate_entry(context)
+        self.assert_observed(gate, new["gates"][0]["command"], 0, new["candidate"]["commit"],
+                             new["gates"][0]["observation"]["sha256"], "gate 'unit'")
+        observed = {"gates": context["gates"], "replay": context.get("replay")}
+        self.assertFalse(self.holds(observed, old_commit), f"superseded commit passed: {observed}")
+        for sha in old_shas:
+            self.assertNotIn(sha, json.dumps(context), "superseded evidence passed")
 
     def test_gate_failure_counts_repair_and_restage_resets(self):
         self.do_red()
