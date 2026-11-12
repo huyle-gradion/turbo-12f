@@ -125,6 +125,8 @@ def bound_sessions(run):
             bound[gate["run_by"]] = gate.get("run_by_role", "qa")
     for review in run.get("reviews") or []:
         bound[review["session"]] = review["role"]
+    for record in run.get("bindings") or []:
+        bound[record["session"]] = record["role"]
     return bound
 
 
@@ -159,6 +161,10 @@ def check_session(run, role, session):
 def bind_session(run, role, session):
     check_session(run, role, session)
     run.setdefault("roles", {})[role] = {"session": session, "at": time.time()}
+    # roles keeps the latest session per role; the history keeps every
+    # one, so a re-run under a new session does not free the old one to
+    # take another role.
+    run.setdefault("bindings", []).append({"role": role, "session": session})
 
 
 def latest_review(run, role, commit=None):

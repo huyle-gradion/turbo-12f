@@ -245,9 +245,9 @@ def cmd_init(args):
             raise StateError(
                 f"state home already bound to {existing.get('repo')}, not {repo}"
             )
-        if existing.get("trunk", "main") != args.trunk:
+        if "trunk" in existing and existing["trunk"] != args.trunk:
             raise StateError(
-                f"state home already follows trunk {existing.get('trunk', 'main')!r}, "
+                f"state home already follows trunk {existing['trunk']!r}, "
                 f"not {args.trunk!r}; use a new state home to change it"
             )
     store.save_json(config_path, config)
@@ -532,6 +532,7 @@ def cmd_gate(args):
     ref = evidence.write_observation(home, run["task_id"], f"gate-{gate['name']}-output.txt", obs)
     gate["run_by"] = args.session
     gate["run_by_role"] = args.role
+    model.bind_session(run, args.role, args.session)
     gate["commit"] = run["candidate"]["commit"]
     model.bump_op(run)
     if obs["timed_out"] or obs["exit_code"] != 0:

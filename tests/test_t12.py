@@ -1352,6 +1352,38 @@ class CliCase(unittest.TestCase):
         result = self.t12("prepare", "--home", home, "--task", task, expect=1)
         self.assertIn("shares no history with trunk", result.stderr)
 
+    def test_a_state_home_from_before_trunks_adopts_one(self):
+        self._git(self.repo, "branch", "-m", "main", "master")
+        home = os.path.join(self.tmp.name, "home-legacy")
+        self.t12("init", "--home", home, "--repo", self.repo, "--trunk", "master")
+        config_path = os.path.join(home, "config.json")
+        with open(config_path) as fh:
+            config = json.load(fh)
+        del config["trunk"]
+        with open(config_path, "w") as fh:
+            json.dump(config, fh)
+        self.t12("init", "--home", home, "--repo", self.repo, "--trunk", "master")
+        with open(config_path) as fh:
+            self.assertEqual(json.load(fh)["trunk"], "master")
+
+    def test_a_qa_session_stays_bound_after_a_rerun_under_another(self):
+        self.do_red()
+        self.do_implement_and_stage()
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit",
+                 "--session", "sess-qa")
+        self.write_worktree("app.py", APP_V2 + "\n")
+        self.commit_worktree("chore: touch")
+        self.t12("stage", "--home", self.home, "--task-id", "demo-1", "--session", "sess-builder")
+        self.t12("gate", "--home", self.home, "--task-id", "demo-1", "--name", "unit",
+                 "--session", "sess-qa-2")
+        self.t12("replay", "--home", self.home, "--task-id", "demo-1")
+        report = os.path.join(self.tmp.name, "qa-review.md")
+        with open(report, "w") as fh:
+            fh.write("Verdict: approve\n")
+        result = self.t12("review", "--home", self.home, "--task-id", "demo-1", "--role", "reviewer",
+                          "--session", "sess-qa", "--verdict", "approve", "--report", report, expect=1)
+        self.assertIn("already bound to the qa role", result.stderr)
+
     def test_init_will_not_switch_the_trunk_of_a_state_home(self):
         self._git(self.repo, "branch", "develop")
         home = os.path.join(self.tmp.name, "home-trunk")
