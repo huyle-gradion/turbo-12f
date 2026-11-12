@@ -447,18 +447,21 @@ Delivery is where the factory meets the outside world, so it is
 where the discipline matters most. The split is strict:
 
 - **The core never touches the network.** It holds no tokens and
-  makes no HTTP calls. `t12 deliver --adapter github|asana
+  makes no HTTP calls. `t12 deliver --adapter github|gitlab|bitbucket|asana
   --report report.json [--resolves]` only records a report an
   adapter already wrote: it checks the report's shape, pins it to
   the reviewed head, enforces the uncertain block, stores the
   report as hashed evidence, and appends a `delivered` event.
   `verify` re-hashes delivery reports like any other evidence,
   and `status` lists the deliveries.
-- **Adapters do the remote work.** `adapters/github.py create-pr`
+- **Adapters do the remote work.** `adapters/github.py create-pr`,
+  `adapters/gitlab.py create-mr`, `adapters/bitbucket.py create-pr`
   and `adapters/asana.py complete` are standalone stdlib-only
   scripts. Tokens come from the environment (`GITHUB_TOKEN`,
-  `ASANA_TOKEN`); the repo comes from `--repo`, the task's
-  `github_repo` field, or the origin remote; the Asana task from
+  `GITLAB_TOKEN`, `BITBUCKET_TOKEN`, `ASANA_TOKEN`); the repo comes
+  from `--repo`/`--project`, the task's `github_repo`,
+  `gitlab_project` or `bitbucket_repo` field, or the origin
+  remote; the Asana task from
   `--task` or the task's `asana_task_gid` field. An adapter exits
   0 when it wrote a report, whatever the outcome — a non-zero
   exit means the adapter itself could not run.
@@ -484,8 +487,8 @@ where the discipline matters most. The split is strict:
   confirmation is uncertain, never rejected: rejected means the
   remote definitively said no. The adapters classify by
   read-vs-mutation, and the tests pin both cases.
-- **No merge.** The GitHub adapter creates the PR and reads it
-  back; it never merges, and there is no merge command. A human
+- **No merge.** The change-request adapters create the PR or MR
+  and read it back; they never merge, and there is no merge command. A human
   merges. Child-PR auto-merge is not a default — enabling it
   would be a delivery decision for the maintainer, not something
   this phase assumes.

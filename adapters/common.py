@@ -21,10 +21,12 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -79,6 +81,59 @@ def manifest_text(home, task_id):
         return ""
     with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+def change_request_body(home, task_id, run, candidate, issue_adapter, repo):
+    """The default change-request body. The task's title, criteria and
+    manifest may come from an issue author, so they go in as inert
+    text; only the factory's own lines can link or close an issue."""
+    manifest = manifest_text(home, task_id)
+    task = "\n".join([run["title"], "", "Acceptance criteria:",
+                      *(f"- {c}" for c in run.get("acceptance_criteria") or [])])
+    return (
+        f"Candidate: {candidate}\n"
+        + "".join(f"{line}\n" for line in source_lines(run.get("source"), issue_adapter, repo))
+        + "\nThe task as written:\n\n" + untrusted_block(task)
+        + (f"\nManifest:\n\n{untrusted_block(manifest)}" if manifest else "")
+    )
+
+
+def origin_url(run):
+    try:
+        return subprocess.run(
+            ["git", "-C", run["repo"], "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+
+def parse_remote(url):
+    """(host, path) from an scp-style or URL git remote, or None.
+    The path has no leading slash and no .git suffix."""
+    url = url or ""
+    scp = re.match(r"^(?:[^@/]+@)?([^:/]+):(?!//)(.+)$", url)
+    if scp:
+        host, path = scp.group(1), scp.group(2)
+    else:
+        parts = urllib.parse.urlparse(url)
+        if parts.scheme not in ("http", "https", "ssh", "git") or not parts.hostname:
+            return None
+        host, path = parts.hostname, parts.path
+    path = path.strip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    return (host.lower(), path) if path else None
+
+
+def missing_branch_outcome(branch, project_status):
+    """The outcome of a 404 on the branch read. Forges answer 404 for a
+    project the token cannot see too, so the branch is only definitely
+    missing once the project itself reads back."""
+    if project_status == 200:
+        return "rejected", f"branch {branch!r} is not on the remote; push it first"
+    return "uncertain", (f"branch {branch!r} was not found and the project could not be "
+                         f"read (status {project_status}); check the token and project name")
 
 
 def request(method, url, token, payload=None, timeout=10):
@@ -146,6 +201,9 @@ def mutation_outcome(status, error, body=None):
 
 def _message(body, default):
     if isinstance(body, dict):
+        nested = body.get("error")
+        if isinstance(nested, dict) and nested.get("message"):
+            return str(nested["message"])[:300]
         for key in ("message", "errors"):
             value = body.get(key)
             if value:

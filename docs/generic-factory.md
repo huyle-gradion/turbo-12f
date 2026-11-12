@@ -21,7 +21,7 @@ Two still are:
 | Concern | Where it is fixed today |
 |---|---|
 | Task intake | hand-written `task.json` only; every task repeats gates, sandbox, `verify_deps` |
-| Delivery | `ADAPTERS` in `t12/delivery.py`; GitHub and Asana scripts only |
+| Delivery | `ADAPTERS` in `t12/delivery.py`; GitHub, GitLab, Bitbucket and Asana scripts |
 
 chat-bridge works around this with its own in-repo factory
 (`chat-bridge/factory/`), which hardcodes `PROTECTED_PATHS`, its

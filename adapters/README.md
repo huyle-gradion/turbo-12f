@@ -37,6 +37,48 @@ bin/t12 deliver --home <state-home> --task-id <id> \
   body. The default PR title breaks issue references the same way.
   An explicit `--body` is used as given.
 
+## GitLab — create a merge request (never merge)
+
+```bash
+export GITLAB_TOKEN=...
+export GITLAB_URL=https://gitlab.example.com   # default https://gitlab.com
+python3 adapters/gitlab.py create-mr --home <state-home> --task-id <id> \
+  --out delivery.json [--project group/name] [--title T] [--body B]
+bin/t12 deliver --home <state-home> --task-id <id> \
+  --adapter gitlab --report delivery.json
+```
+
+- Uses the REST v4 API at `$GITLAB_URL/api/v4`. The token is sent
+  as a bearer token.
+- The project comes from `--project`, the task's `gitlab_project`
+  field, or the origin remote (only when its host is the
+  `GITLAB_URL` host). Nested groups work: `group/sub/name`.
+- The branch must already be pushed. The adapter finds an open MR
+  for the branch, creates one if none, then reads it back and
+  compares its `sha` to the reviewed head. An existing MR with the
+  reviewed head is `confirmed` with no duplicate; with another
+  head, `rejected`.
+
+## Bitbucket Cloud — create a pull request (never merge)
+
+```bash
+export BITBUCKET_TOKEN=...
+export BITBUCKET_URL=https://api.bitbucket.org/2.0   # the default
+python3 adapters/bitbucket.py create-pr --home <state-home> --task-id <id> \
+  --out delivery.json [--repo workspace/slug] [--title T] [--body B]
+bin/t12 deliver --home <state-home> --task-id <id> \
+  --adapter bitbucket --report delivery.json
+```
+
+- The token is sent as a bearer token.
+- The repo comes from `--repo`, the task's `bitbucket_repo` field,
+  or the origin remote (only on `bitbucket.org`).
+- Same flow as GitLab: find an open PR for the branch, create one
+  if none, read back `source.commit.hash`. Bitbucket may return an
+  abbreviated hash, so it is compared as a prefix of the full
+  reviewed SHA. A hash shorter than 12 characters cannot be
+  compared, so the outcome is `uncertain`, never `confirmed`.
+
 ## Asana — mark a task complete
 
 ```bash
@@ -168,6 +210,18 @@ Rules: a failed READ is always `uncertain` — a 401/403 or 5xx on
 a read is not a denial and not a rejection. A failed MUTATION is
 `denied` on 403, `rejected` on 404/422 and other definite 4xx,
 `uncertain` on 5xx/timeout.
+
+Forge-specific readings of those rules:
+
+- A 404 on the branch is `rejected` only when the project or repo
+  itself reads back. Forges also answer 404 for a project the token
+  cannot see, so otherwise it is `uncertain`.
+- An existing change request is `confirmed` only when it has the
+  reviewed head and targets the run's base branch. The same head on
+  another target is `rejected`.
+- Bitbucket pull requests report an abbreviated hash, so the Bitbucket
+  adapter also requires the branch's full head to equal the reviewed
+  commit.
 
 ## The uncertain block
 

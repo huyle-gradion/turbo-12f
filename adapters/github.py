@@ -31,13 +31,13 @@ Outcome rules:
 import argparse
 import os
 import re
-import subprocess
 import sys
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import (  # noqa: E402
-    break_issue_refs, manifest_text, mutation_outcome, read_outcome, read_run,
-    report, request, source_lines, untrusted_block, write_report,
+    break_issue_refs, change_request_body, missing_branch_outcome, mutation_outcome, origin_url,
+    read_outcome, read_run, report, request, write_report,
 )
 
 
@@ -54,14 +54,7 @@ def resolve_repo(run, explicit):
         return explicit
     if run.get("github_repo"):
         return run["github_repo"]
-    try:
-        url = subprocess.run(
-            ["git", "-C", run["repo"], "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-    except (subprocess.SubprocessError, OSError):
-        url = ""
-    return parse_remote(url)
+    return parse_remote(origin_url(run))
 
 
 def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
@@ -71,16 +64,8 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
         raise SystemExit("error: run has no staged candidate")
     branch = run["branch"]
     base = run["base"]
-    manifest = manifest_text(home, task_id)
     if body is None:
-        task = "\n".join([run["title"], "", "Acceptance criteria:",
-                          *(f"- {c}" for c in run.get("acceptance_criteria") or [])])
-        body = (
-            f"Candidate: {candidate}\n"
-            + "".join(f"{line}\n" for line in source_lines(run.get("source"), "github-issues", repo))
-            + "\nThe task as written:\n\n" + untrusted_block(task)
-            + (f"\nManifest:\n\n{untrusted_block(manifest)}" if manifest else "")
-        )
+        body = change_request_body(home, task_id, run, candidate, "github-issues", repo)
     if title is None:
         # A squash merge makes the title a commit message on the default
         # branch, where a closing keyword in it closes the issue.
@@ -94,14 +79,16 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
     status, _body, error = request(
         "GET", f"{api_base}/repos/{repo}/branches/{branch}", token, timeout=timeout)
     if status == 404:
-        return fail("rejected", f"branch {branch!r} is not on the remote; push it first")
+        project_status, _, _ = request("GET", f"{api_base}/repos/{repo}", token, timeout=timeout)
+        return fail(*missing_branch_outcome(branch, project_status))
     if status != 200:
         outcome, detail = read_outcome(status, error)
         return fail(outcome, f"could not check remote branch: {detail}")
 
     # 2. A PR for this branch may already exist — find it, do not duplicate.
     status, listing, error = request(
-        "GET", f"{api_base}/repos/{repo}/pulls?state=open&head={repo.split('/')[0]}:{branch}",
+        "GET", f"{api_base}/repos/{repo}/pulls?state=open&head={repo.split('/')[0]}:{branch}"
+               f"&base={quote(base, safe='')}",
         token, timeout=timeout)
     if status != 200 or not isinstance(listing, list):
         outcome, detail = read_outcome(status, error)
@@ -116,6 +103,10 @@ def create_pr(home, task_id, repo, title, body, api_base, timeout, token):
             outcome, detail = read_outcome(status, error)
             return fail(outcome, f"could not read back PR #{number}: {detail}")
         head_sha = (pr.get("head") or {}).get("sha")
+        target = (pr.get("base") or {}).get("ref")
+        if head_sha == candidate and target != base:
+            return fail("rejected", f"PR #{number} has the reviewed head but targets "
+                        f"{target!r}, not {base!r}", ref=pr.get("html_url"))
         if head_sha == candidate:
             return fail("confirmed", f"PR #{number} already exists with the reviewed head",
                         ref=pr.get("html_url"))
