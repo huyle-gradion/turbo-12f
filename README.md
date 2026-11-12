@@ -97,6 +97,7 @@ merge — a human merges.
 | `deliver` | Record an adapter's report as evidence: `--adapter github\|asana --report FILE [--resolves]` (requires `local-verified`, pinned to the reviewed head) |
 | `board` | One row per run: phase, candidate, budget left, whether a command is running on it, and who acts next (`--json` for scripts) |
 | `report` | Budget report across runs: usage vs budget, cap hits, calibration summary (`--json` for scripts) |
+| `retro` | Lessons that recur across runs (gate failures and suite time per gate, rejected worker outputs, review finding classes, repeated escalations), each with a proposed check; changes nothing (`--min N`, `--json`) |
 | `calibrate` | Recommend defaults from completed runs; `--apply` writes `limits.json` |
 | `status` | Show phase, budgets, gates, candidate |
 | `pause` / `resume` | Pause with a reason; resume re-validates from disk (`--answer TEXT` is required while an escalation is open, and records the human's reply) |
@@ -150,6 +151,71 @@ the task file. When omitted, `prepare` uses `limits.json` in the
 state home if `t12 calibrate --apply` has written one, else the
 built-ins (3600s / 100 ops / 3 repairs). The run records which
 source applied (`budget_source`).
+
+## Running several tasks at once
+
+Separate runs share one state home and proceed in parallel. Each
+command that changes a run holds that run's lock, so a second command
+on the same run fails with `busy` instead of corrupting its log.
+`t12 board` shows every run and who acts next.
+
+Two optional task fields keep parallel runs from colliding at merge:
+
+- `"touches": ["src/auth", "tests/auth"]` lists the paths the task
+  may change. `stage` refuses a candidate that changes anything else
+  since the base commit, including the test the test-writer added.
+  A task without `touches` may change anything.
+- `"depends_on": ["task-a"]` names tasks that must be merged first.
+
+`bin/t12-queue --home <state> --queue <dir> --max N` makes one pass
+over a directory of task files in file-name order. It prepares each
+task whose dependencies are local-verified and merged into their
+base, whose `touches` overlap no unmerged run, and that fits under N
+active runs. Every other task stays queued with its reason. A task
+without `touches` overlaps everything, so it runs alone. Start one
+orchestrator per `started` line and run the pass again whenever a
+run finishes or a merge lands; a task that already has a run is never
+prepared twice.
+
+The queue counts a run as merged when its candidate commit is in the
+base branch's history, as after a merge commit or a fast-forward. A
+squash or rebase merge creates new commits, so the queue never sees
+that run as merged: tasks that depend on it, or overlap it, wait. Use
+merge commits for factory branches.
+
+Runs prepared before `touches` existed carry no `base_commit`, so
+`stage` skips the `touches` and policy checks for them. Finish or
+supersede them before relying on either.
+
+## Improving the factory
+
+`t12 retro` reads every run's event log and structured reviews and
+lists what keeps recurring: a gate that fails in most runs, a worker
+output rejected for the same reason, a review finding class, a
+question escalated again and again. Each comes with a proposed check.
+Prefer a check (a gate, a probe, a refusal in `stage`, a stricter
+field in `tools.py`) over more prompt text: a worker can ignore a
+prompt, not a check. Like `calibrate`, `retro` only proposes. Turn a
+proposal into a task file and run it through the factory; a human
+merges.
+
+## Letting the factory work on itself
+
+turbo-12f is a repo like any other, so a `retro` proposal can become
+a task aimed at turbo-12f. Two rules keep that safe:
+
+- **The candidate never checks itself.** Run the factory from an
+  installed copy of `main` (or the `turbo-12f` image through
+  `bin/t12-container`), never from a worktree. `t12` refuses to run
+  when its own code sits inside the state home it is given.
+- **Policy changes need a security review.** A product repo may list
+  paths in `.t12/policy.json` as `"security_review_paths"`. `stage`
+  reads that file from the run's base commit, not the candidate, and
+  adds `security` to `required_reviews` when the candidate changes a
+  listed path or the policy file itself. turbo-12f lists its state
+  machine, sandbox, evidence and storage code, and its prompts.
+
+The factory still stops at `local-verified`. A human merges.
 
 ## Running in a container
 

@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Admit queued tasks that cannot collide with the runs already going.
+
+One pass over a directory of task files, in file-name order. A task
+with no run yet starts (through `t12 prepare`) when every task it
+depends on is local-verified and merged into its base, its touches
+overlap no run that is still unmerged, and fewer than --max runs are
+active. Every other task stays queued, with the reason printed.
+Re-running the pass is safe: a task that already has a run is never
+prepared again. Start one orchestrator per `started` line.
+
+Host-side, like the delivery adapters: it reads run records and calls
+the CLI, and the core never imports it.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import subprocess
+import sys
+
+T12 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "t12")
+
+
+def load(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def is_merged(repo, run):
+    if run["phase"] != "local-verified":
+        return False
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", run["candidate"]["commit"], run["base"]],
+        cwd=repo, capture_output=True, timeout=60)
+    return result.returncode == 0
+
+
+def normalized(touches):
+    """A task's touches as the core stores them, or None for anything
+    that is not a list of strings (prepare refuses those anyway)."""
+    if not isinstance(touches, list) or not all(isinstance(t, str) for t in touches):
+        return None
+    return [os.path.normpath(t) for t in touches]
+
+
+def overlaps(a, b):
+    if a is None or b is None:
+        return True
+    return any(x == y or x.startswith(y + os.sep) or y.startswith(x + os.sep)
+               for x in a for y in b)
+
+
+def load_runs(home):
+    runs = {}
+    runs_dir = os.path.join(home, "runs")
+    for name in sorted(os.listdir(runs_dir)):
+        if name.endswith(".json") and ".superseded-" not in name:
+            run = load(os.path.join(runs_dir, name))
+            runs[run["task_id"]] = run
+    return runs
+
+
+def admit(home, queue_dir, max_active):
+    repo = load(os.path.join(home, "config.json"))["repo"]
+    runs = load_runs(home)
+    merged = {tid for tid, run in runs.items() if is_merged(repo, run)}
+    claims = {tid: run.get("touches") for tid, run in runs.items()
+              if run["phase"] != "stopped" and tid not in merged}
+    active = sum(1 for run in runs.values() if run["phase"] not in ("stopped", "local-verified"))
+    for name in sorted(os.listdir(queue_dir)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(queue_dir, name)
+        task = load(path)
+        task_id = task.get("id")
+        if task_id in runs:
+            continue
+        touches = normalized(task.get("touches"))
+        unmet = [d for d in task.get("depends_on", []) if d not in merged]
+        clash = [tid for tid, claimed in claims.items() if overlaps(touches, claimed)]
+        if unmet:
+            print(f"waiting {task_id}: depends on {', '.join(unmet)}, not merged yet")
+        elif clash:
+            print(f"waiting {task_id}: touches overlap {', '.join(clash)}")
+        elif active >= max_active:
+            print(f"waiting {task_id}: at capacity ({active} active)")
+        else:
+            result = subprocess.run([T12, "prepare", "--home", home, "--task", path],
+                                    capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"failed {task_id}: {result.stderr.strip()}")
+                continue
+            print(f"started {task_id}")
+            claims[task_id] = touches
+            active += 1
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="t12-queue", description=__doc__.splitlines()[0])
+    parser.add_argument("--home", required=True)
+    parser.add_argument("--queue", required=True, help="directory of task files")
+    parser.add_argument("--max", type=int, required=True, help="most runs active at once")
+    args = parser.parse_args(argv)
+    home = os.path.abspath(args.home)
+    with open(os.path.join(home, "queue.lock"), "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("error: another t12-queue pass is running on this state home", file=sys.stderr)
+            return 1
+        admit(home, os.path.abspath(args.queue), args.max)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

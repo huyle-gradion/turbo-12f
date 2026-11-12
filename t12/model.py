@@ -244,6 +244,41 @@ def record_measurements(run):
     return run["measurements"]
 
 
+def paths_overlap(a, b):
+    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
+def under(path, roots):
+    return any(path == r or path.startswith(r + os.sep) for r in roots)
+
+
+def outside_touches(run, paths):
+    """The paths a run may not change under its declared touches."""
+    touches = run.get("touches")
+    if touches is None:
+        return []
+    return [p for p in paths if not under(p, touches)]
+
+
+POLICY_PATH = ".t12/policy.json"
+
+
+def security_paths(policy_text):
+    """Paths whose change requires a security review, from the policy
+    file as it stands on the base commit. The policy folder is always
+    one of them, so a candidate can neither drop an entry nor add the
+    first policy without a security review."""
+    if policy_text is None:
+        return [os.path.dirname(POLICY_PATH)]
+    try:
+        paths = json.loads(policy_text).get("security_review_paths", [])
+    except (ValueError, AttributeError) as exc:
+        raise StateError(f"{POLICY_PATH} on the base commit is not a JSON object") from exc
+    if not isinstance(paths, list) or not all(_is_worktree_path(p) for p in paths):
+        raise StateError(f"{POLICY_PATH}: security_review_paths must be relative paths: {paths!r}")
+    return [os.path.normpath(p) for p in paths] + [os.path.dirname(POLICY_PATH)]
+
+
 def _is_worktree_path(path):
     if not isinstance(path, str) or not path or os.path.isabs(path):
         return False
@@ -258,7 +293,7 @@ def open_escalation(run):
     return None
 
 
-def new_run(task, repo, home, supersedes=None, defaults=None,
+def new_run(task, repo, home, base_commit, supersedes=None, defaults=None,
             defaults_source="builtin", sandbox_adapter=None, sandbox_image=None):
     now = time.time()
     defaults = defaults or limits_mod.BUILTIN_DEFAULTS
@@ -296,8 +331,20 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
     normalized = [os.path.normpath(d) for d in verify_deps]
     for i, a in enumerate(normalized):
         for b in normalized[i + 1:]:
-            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+            if paths_overlap(a, b):
                 raise StateError(f"verify_deps entries overlap: {a!r} and {b!r}")
+    touches = task.get("touches")
+    if touches is not None:
+        if not isinstance(touches, list) or not touches or not all(
+                _is_worktree_path(t) for t in touches):
+            raise StateError(
+                f"touches must be a non-empty list of relative paths inside the worktree: {touches!r}"
+            )
+        touches = sorted({os.path.normpath(t) for t in touches})
+    depends_on = task.get("depends_on", [])
+    if not isinstance(depends_on, list) or not all(
+            isinstance(d, str) and TASK_ID_RE.match(d) for d in depends_on):
+        raise StateError(f"depends_on must be a list of task ids: {depends_on!r}")
     return {
         "version": VERSION,
         "task_id": task["id"],
@@ -305,6 +352,9 @@ def new_run(task, repo, home, supersedes=None, defaults=None,
         "acceptance_criteria": list(task["acceptance_criteria"]),
         "repo": repo,
         "base": task.get("base", "main"),
+        "base_commit": base_commit,
+        "touches": touches,
+        "depends_on": list(depends_on),
         "branch": task.get("branch") or f"task/{task['id']}",
         "worktree": os.path.join(home, "worktrees", task["id"]),
         "phase": "unadmitted",
