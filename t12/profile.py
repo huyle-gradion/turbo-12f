@@ -149,6 +149,13 @@ def _intake(value):
     adapter does. Validated here so a typo fails at `prepare`, not at
     the next intake run."""
     where = f"{PATH}: intake"
+    if isinstance(value, dict) and value.get("adapter") == "asana-tasks":
+        if set(value) - {"adapter", "project", "tag"}:
+            raise StateError(f"{where} must be an object of adapter, project and tag")
+        for key in ("project", "tag"):
+            if not isinstance(value.get(key), str) or not value[key].strip():
+                raise StateError(f"{where}: {key} must be a non-empty string")
+        return dict(value)
     if not isinstance(value, dict) or set(value) - {"adapter", "repo", "label"}:
         raise StateError(f"{where} must be an object of adapter, repo and label")
     adapter, repo, label = value.get("adapter"), value.get("repo"), value.get("label")
