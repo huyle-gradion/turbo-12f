@@ -19,7 +19,7 @@ an issue, so the profile is the floor:
   entry may overlap a protected path, since gates load deps from the
   builder's worktree.
 - budgets: the task wins.
-- protected_paths, security_review_paths, roles, intake: profile only.
+- protected_paths, security_review_paths, roles, intake, delivery: profile only.
 
 Roles are names a project picks, each mapped to a kind the core
 enforces (see tools.TOOLS). The built-in roles are always present; a
@@ -97,8 +97,9 @@ TASK_KEYS = {
     "repair_cap": (int, _task_wins),
 }
 SCOPE_KEYS = ("protected_paths", "security_review_paths")
-PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake")
-OTHER_KEYS = ("version", "name", "roles", "intake")
+PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake", "delivery")
+OTHER_KEYS = ("version", "name", "roles", "intake", "delivery")
+DELIVERY_ADAPTERS = ("github", "gitlab", "bitbucket")
 
 
 def _paths(key, value):
@@ -161,6 +162,16 @@ def _intake(value):
             if v is not None}
 
 
+def _delivery(value):
+    """Which forge the runner opens change requests on."""
+    where = f"{PATH}: delivery"
+    if not isinstance(value, dict) or set(value) != {"adapter"}:
+        raise StateError(f"{where} must be an object with only an adapter")
+    if value["adapter"] not in DELIVERY_ADAPTERS:
+        raise StateError(f"{where}: adapter must be one of {list(DELIVERY_ADAPTERS)}")
+    return {"adapter": value["adapter"]}
+
+
 def review_roles(roles):
     return sorted(name for name, spec in roles.items() if spec["kind"] == "review")
 
@@ -193,6 +204,8 @@ def parse(text):
     data["roles"] = _roles(data.get("roles", {}))
     if "intake" in data:
         data["intake"] = _intake(data["intake"])
+    if "delivery" in data:
+        data["delivery"] = _delivery(data["delivery"])
     reviewers = review_roles(data["roles"])
     unknown = [r for r in data.get("required_reviews", []) if r not in reviewers]
     if unknown:
