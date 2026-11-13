@@ -10,7 +10,7 @@ Usage:
 Token from ASANA_TOKEN. The approval marker is a tag on the task; the
 criteria are an "Acceptance criteria" list in its description (rich text
 is read as the equivalent markdown). Each approved open sub-task is its
-own queued task, and its parent depends on it. Task ids are `as-<gid>`.
+own queued task; a task with open sub-tasks is a parent and never runs. Task ids are `as-<gid>`.
 See common.py for the rules every intake adapter follows.
 """
 
@@ -89,18 +89,15 @@ def list_issues(args, project, tag, token):
                 {(x.get("name") or "").lower() for x in t.get("tags") or [] if isinstance(x, dict)}]
 
     def collect(tasks):
-        """Normalised issues for approved TASKS and their sub-tasks;
-        returns the ids of those that can become a task."""
-        usable = []
+        """Normalised issues for approved TASKS and their approved
+        sub-tasks. A task with open sub-tasks is a parent, and intake
+        refuses it; its sub-tasks run on their own."""
         for task in sorted(approved(tasks), key=lambda t: int(t["gid"])):
-            children = collect(_list(f"{base}/tasks/{task['gid']}/subtasks", token))
-            issue = {"number": int(task["gid"]), "title": task.get("name"),
-                     "body": description(task), "url": task.get("permalink_url"),
-                     "depends_on": children}
-            issues.append(issue)
-            if common.issue_to_task(issue, NAME, project, "as")[1]:
-                usable.append(f"as-{task['gid']}")
-        return usable
+            children = _list(f"{base}/tasks/{task['gid']}/subtasks", token)
+            issues.append({"number": int(task["gid"]), "title": task.get("name"),
+                           "body": description(task), "url": task.get("permalink_url"),
+                           "sub_issues": sum(1 for c in children if not c.get("completed"))})
+            collect(children)
 
     collect(_list(f"{base}/projects/{project}/tasks", token))
     return issues

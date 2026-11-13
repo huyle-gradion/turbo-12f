@@ -248,65 +248,99 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
 PLAIN_HEADING_RE = re.compile(r"^\s{0,3}(acceptance criteria):?\s*$", re.I)
 CRITERIA_HEADING_RE = re.compile(r"^acceptance criteria\b", re.I)
+OPEN_HEADING_RE = re.compile(r"^open questions?\b", re.I)
+OPEN_LINE_RE = re.compile(r"^[\s_*]*open questions?\s*:(.*)$", re.I)
 ITEM_RE = re.compile(r"^\s*[-*]\s+(?:\[[ xX]\]\s+)?(.+?)\s*$")
 LABELLED_RE = re.compile(r"^\s*(touches|depends[ _-]?on)\s*:\s*(.*?)\s*$", re.I)
-MAX_CRITERIA = 50
+MAX_CRITERIA = 10
+WARN_CRITERIA = 7
 MAX_TEXT = 1000
 PER_PAGE = 100
 MAX_PAGES = 20
+STANDARD = "docs/spec-standard.md"
 
 
 class IntakeError(Exception):
     """The adapter could not establish the issue list; nothing is written."""
 
 
-def parse_body(body, id_prefix):
-    """(fields, problem) from an issue body. Fields hold only
-    `acceptance_criteria` and, when labelled, `touches` and
-    `depends_on`; problem is why the issue cannot become a task."""
+def _is_none(text):
+    return text.strip(" \t_*.").lower() in ("", "none")
+
+
+def spec_check(body, id_prefix, depends_text=True):
+    """(fields, refusals, warnings) for an issue body, by the rules in
+    docs/spec-standard.md that the body alone can show. Fields hold only
+    `acceptance_criteria`, `touches` and, when labelled, `depends_on`.
+    DEPENDS_TEXT is false on a forge with native dependencies, where a
+    `Depends on:` line is refused so the order lives in one place."""
     # Intake cannot tell exactly what a forge hides: comment and fence
     # rules differ between parsers, and a wrong guess either reads text
     # the maintainer never saw or drops a scope line they did see. So an
     # issue with a comment is refused, and every other line is read,
     # fenced or not; visible code can only narrow a task.
     if "<!--" in (body or ""):
-        return None, "the body contains an HTML comment, so intake cannot be sure what the page shows"
-    criteria, in_section, seen = [], False, False
-    labelled = {}
+        return None, ["the body contains an HTML comment, so intake cannot be sure what the page shows"], []
+    criteria, section, seen = [], None, False
+    labelled, open_questions = {}, []
     for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
         heading = HEADING_RE.match(line) or PLAIN_HEADING_RE.match(line)
         if heading:
-            in_section = not seen and bool(CRITERIA_HEADING_RE.match(heading.group(1)))
-            seen = seen or in_section
+            title = heading.group(1)
+            if not seen and CRITERIA_HEADING_RE.match(title):
+                section, seen = "criteria", True
+            else:
+                section = "open" if OPEN_HEADING_RE.match(title) else None
             continue
         item = ITEM_RE.match(line)
-        if in_section and item:
+        if section == "criteria" and item:
             criteria.append(item.group(1))
+            continue
+        marker = OPEN_LINE_RE.match(line)
+        if marker:
+            if not _is_none(marker.group(1)):
+                open_questions.append(line.strip())
+            continue
+        if section == "open" and not _is_none(line):
+            open_questions.append(line.strip())
             continue
         label = LABELLED_RE.match(line)
         if label:
             key = "touches" if label.group(1).lower() == "touches" else "depends_on"
             labelled.setdefault(key, []).extend(
                 v for v in re.split(r"[,\s]+", label.group(2)) if v)
+    refusals, warnings = [], []
     if not criteria:
-        return None, 'no "Acceptance criteria" heading with a "- " list under it'
-    if len(criteria) > MAX_CRITERIA or any(len(c) > MAX_TEXT for c in criteria):
-        return None, f"more than {MAX_CRITERIA} criteria or one longer than {MAX_TEXT} characters"
+        refusals.append('no "Acceptance criteria" heading with a "- " list under it')
+    elif len(criteria) > MAX_CRITERIA:
+        refusals.append(f"{len(criteria)} acceptance criteria, more than {MAX_CRITERIA}: "
+                        f"split it into sub-issues ({STANDARD})")
+    elif len(criteria) >= WARN_CRITERIA:
+        warnings.append(f"{len(criteria)} acceptance criteria; consider a split ({STANDARD})")
+    if any(len(c) > MAX_TEXT for c in criteria):
+        refusals.append(f"an acceptance criterion is longer than {MAX_TEXT} characters")
+    if open_questions:
+        refusals.append(f"open questions are left: {open_questions[0][:200]!r}; "
+                        "decide them and record the choice under Decisions")
     fields = {"acceptance_criteria": criteria}
-    if "touches" in labelled:
-        touches = [os.path.normpath(t) for t in labelled["touches"]]
-        bad = [t for t in labelled["touches"] if not _worktree_path(t)]
-        if bad or not touches:
-            return None, f"Touches must be relative paths inside the repo, got {bad or 'none'}"
-        fields["touches"] = sorted(set(touches))
-    if "depends_on" in labelled:
+    touches = labelled.get("touches", [])
+    bad = [t for t in touches if not _worktree_path(t)]
+    if bad or not touches:
+        refusals.append(f"Touches must list relative paths inside the repo, got {bad or 'none'}")
+    else:
+        fields["touches"] = sorted({os.path.normpath(t) for t in touches})
+    if "depends_on" in labelled and not depends_text:
+        refusals.append("a Depends on: line is refused here; use the forge's native "
+                        "\"blocked by\" relation instead")
+    elif "depends_on" in labelled:
         ids = [f"{id_prefix}-{d[1:]}" if re.fullmatch(r"#\d+", d) else d
                for d in labelled["depends_on"]]
         bad = [d for d in ids if not TASK_ID_RE.match(d)]
         if bad or not ids:
-            return None, f"Depends on must be task ids or #numbers, got {bad or 'none'}"
-        fields["depends_on"] = sorted(set(ids))
-    return fields, None
+            refusals.append(f"Depends on must be task ids or #numbers, got {bad or 'none'}")
+        else:
+            fields["depends_on"] = sorted(set(ids))
+    return (None if refusals else fields), refusals, warnings
 
 
 def _worktree_path(path):
@@ -315,31 +349,54 @@ def _worktree_path(path):
     return os.path.normpath(path).split(os.sep)[0] not in ("..", ".", ".git")
 
 
-def issue_to_task(issue, adapter, repo, id_prefix):
-    """(task, problem) for one normalised issue: number, title, body, url."""
+def relation_refusals(issue, repo, id_prefix):
+    """(depends_on ids, refusals) from an issue's native relations.
+    `sub_issues` counts its children: a parent never runs, only its
+    sub-issues do. `blocked_by` lists {repo, number, state} with state
+    open, completed or not_planned; a completed blocker has landed and
+    adds no wait."""
+    refusals, ids = [], []
+    if issue.get("sub_issues"):
+        refusals.append(f"it has {issue['sub_issues']} sub-issue(s); a parent never runs, "
+                        "so remove its label and label the sub-issues")
+    for blocker in issue.get("blocked_by") or []:
+        name = f"{blocker['repo']}#{blocker['number']}"
+        if blocker["repo"].lower() != repo.lower():
+            refusals.append(f"it is blocked by {name} in another repository, which the queue cannot see")
+        elif blocker["state"] == "open":
+            ids.append(f"{id_prefix}-{blocker['number']}")
+        elif blocker["state"] != "completed":
+            refusals.append(f"it is blocked by {name}, which was closed without landing")
+    return sorted(set(ids)), refusals
+
+
+def issue_to_task(issue, adapter, repo, id_prefix, depends_text=True):
+    """(task_id, task, problem, warnings) for one normalised issue:
+    number, title, body, url, and optionally sub_issues and blocked_by."""
     task_id = f"{id_prefix}-{issue['number']}"
-    fields, problem = parse_body(issue["body"], id_prefix)
+    fields, refusals, warnings = spec_check(issue["body"], id_prefix, depends_text)
+    native, more = relation_refusals(issue, repo, id_prefix)
+    refusals += more
     title = " ".join(str(issue["title"] or "").split())[:200]
-    if not problem and not title:
-        problem = "the issue has no title"
-    if not problem and task_id in fields.get("depends_on", []):
-        problem = "the issue depends on itself"
-    if problem:
-        return task_id, None, problem
-    if issue.get("depends_on"):
-        fields["depends_on"] = sorted(set(fields.get("depends_on", [])) | set(issue["depends_on"]))
+    if not title:
+        refusals.append("the issue has no title")
+    depends = sorted(set((fields or {}).get("depends_on", [])) | set(native))
+    if task_id in depends:
+        refusals.append("the issue depends on itself")
+    if refusals:
+        return task_id, None, "; ".join(refusals), warnings
     task = {
         "id": task_id,
         "title": title,
         "acceptance_criteria": fields["acceptance_criteria"],
         "source": {"adapter": adapter, "ref": f"{repo}#{issue['number']}"},
+        "touches": fields["touches"],
     }
     if re.fullmatch(r"https?://\S+", issue.get("url") or ""):
         task["source"]["url"] = issue["url"]
-    for key in ("touches", "depends_on"):
-        if key in fields:
-            task[key] = fields[key]
-    return task_id, task, None
+    if depends:
+        task["depends_on"] = depends
+    return task_id, task, None, warnings
 
 
 def get_pages(url_for_page, token):
@@ -406,12 +463,15 @@ def _write_if_changed(out_dir, task, adapter):
     return "wrote", path
 
 
-def sync(issues, adapter, repo, id_prefix, out_dir, home):
+def sync(issues, adapter, repo, id_prefix, out_dir, home, depends_text=True):
     """Write one task file per usable issue and withdraw the tasks of
     issues no longer listed; one printed line each."""
     os.makedirs(out_dir, exist_ok=True)
     for issue in sorted(issues, key=lambda i: i["number"]):
-        task_id, task, problem = issue_to_task(issue, adapter, repo, id_prefix)
+        task_id, task, problem, warnings = issue_to_task(
+            issue, adapter, repo, id_prefix, depends_text)
+        for warning in warnings:
+            print(f"warning {task_id}: {warning}")
         if problem:
             print(f"skipped {task_id}: {problem}")
         elif _has_run(home, task_id):
@@ -447,10 +507,11 @@ def _withdraw(listed, adapter, repo, out_dir, home):
 
 
 def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=None,
-                scope=("repo", "label")):
+                scope=("repo", "label"), depends_text=True):
     """Shared `intake` command. list_issues(args, repo, label, token)
     returns normalised issues (number, title, body, url, and optionally
-    depends_on task ids) or raises IntakeError. `scope` names the two
+    sub_issues and blocked_by) or raises IntakeError. DEPENDS_TEXT is
+    false for a forge whose native dependencies replace the text line. `scope` names the two
     settings (flag and profile key) that select what to list. Exit 0: every issue was handled. 1: the listing
     failed, nothing written. 2: the adapter could not run."""
     parser = argparse.ArgumentParser(description=f"{name} intake adapter")
@@ -490,7 +551,7 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
     except IntakeError as exc:
         print(f"error: {exc}; nothing written", file=sys.stderr)
         return 1
-    sync(issues, name, repo, id_prefix, os.path.abspath(args.out_dir), args.home)
+    sync(issues, name, repo, id_prefix, os.path.abspath(args.out_dir), args.home, depends_text)
     return 0
 
 
@@ -535,3 +596,37 @@ def _committed_profile(repo, branch):
     if shown.returncode != 0:
         raise ValueError(f"branch {branch!r} in {repo} has no {PROFILE_PATH}")
     return shown.stdout
+
+
+NATIVE_DEPENDENCIES = {"github": True, "gitlab": False, "asana": False}
+
+
+def spec_check_main(argv=None):
+    """`spec-check`: the body-only rules, for an issue before it is
+    filed. Prints JSON {ok, refusals, warnings, new_files}; exit 0 when
+    it would pass intake, 1 when refused, 2 on bad arguments. Relations
+    (sub-issues, blocked by) are checked at intake, once they exist."""
+    parser = argparse.ArgumentParser(prog="spec-check", description=spec_check_main.__doc__)
+    parser.add_argument("body", nargs="?", default="-", help="file holding the issue body; - for stdin")
+    parser.add_argument("--forge", choices=sorted(NATIVE_DEPENDENCIES), default="github")
+    parser.add_argument("--repo-root", help="checkout to report Touches paths that do not exist yet")
+    args = parser.parse_args(argv)
+    if args.body == "-":
+        body = sys.stdin.read()
+    else:
+        with open(args.body, encoding="utf-8") as fh:
+            body = fh.read()
+    fields, refusals, warnings = spec_check(body, "x", not NATIVE_DEPENDENCIES[args.forge])
+    new_files = []
+    if fields and args.repo_root:
+        new_files = [t for t in fields["touches"]
+                     if not os.path.exists(os.path.join(args.repo_root, t))]
+    print(json.dumps({"ok": not refusals, "refusals": refusals, "warnings": warnings,
+                      "new_files": new_files}, indent=2))
+    return 1 if refusals else 0
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["spec-check"]:
+        raise SystemExit("usage: common.py spec-check [BODY] [--forge F] [--repo-root DIR]")
+    raise SystemExit(spec_check_main(sys.argv[2:]))

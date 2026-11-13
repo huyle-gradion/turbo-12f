@@ -16,7 +16,7 @@ import sys
 from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import PER_PAGE, get_pages, intake_main  # noqa: E402
+from common import PER_PAGE, IntakeError, get_pages, intake_main, read_outcome, request  # noqa: E402
 
 NAME = "github-issues"
 
@@ -31,7 +31,9 @@ def list_issues(args, repo, label, token):
     items = get_pages(url_for, token)
     return [
         {"number": int(i["number"]), "title": i.get("title"), "body": i.get("body"),
-         "url": i.get("html_url")}
+         "url": i.get("html_url"),
+         "sub_issues": int((i.get("sub_issues_summary") or {}).get("total") or 0),
+         "blocked_by": blocked_by(base, repo, i, token)}
         for i in items
         # The issues endpoint also lists pull requests; they are not tasks.
         if "pull_request" not in i
@@ -40,10 +42,28 @@ def list_issues(args, repo, label, token):
     ]
 
 
+def blocked_by(base, repo, issue, token):
+    """The issue's native "blocked by" issues as {repo, number, state};
+    fetched only when the issue says it has any."""
+    if not (issue.get("issue_dependencies_summary") or {}).get("total_blocked_by"):
+        return []
+    url = f"{base}/repos/{repo}/issues/{issue['number']}/dependencies/blocked_by?per_page={PER_PAGE}"
+    status, body, error = request("GET", url, token)
+    if status != 200 or not isinstance(body, list):
+        raise IntakeError(f"could not read what blocks #{issue['number']}: "
+                          f"{read_outcome(status, error)[1]}")
+    return [{"repo": "/".join(str(b.get("repository_url", "")).split("/")[-2:]),
+             "number": int(b["number"]),
+             "state": "open" if b.get("state") == "open"
+             else "completed" if b.get("state_reason") == "completed" else "not_planned"}
+            for b in body]
+
+
 def main(argv=None):
     return intake_main(
         argv, NAME, "gh", "GITHUB_TOKEN", list_issues,
-        lambda p: p.add_argument("--api-base", default="https://api.github.com"))
+        lambda p: p.add_argument("--api-base", default="https://api.github.com"),
+        depends_text=False)
 
 
 if __name__ == "__main__":
