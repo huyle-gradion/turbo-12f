@@ -337,6 +337,18 @@ class CliCase(unittest.TestCase):
         for role in ("test-writer", "reviewer"):
             self.assertNotIn("carried_patch", self.carried_context(role), role)
 
+    def test_supersede_carry_passes_the_unanswered_question_to_every_role(self):
+        self.do_red()
+        self.t12("escalate", "--home", self.home, "--task-id", "demo-1",
+                 "--question", "builder: the test never reaches demo-1")
+        self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "retry")
+        self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede", "--carry")
+        for role in ("test-writer", "builder", "reviewer"):
+            context = self.carried_context(role)
+            self.assertEqual(context["carried_open_questions"],
+                             ["builder: the test never reaches demo-1"], role)
+            self.assertEqual(context["human_responses"], [], role)
+
     def test_supersede_without_carry_starts_clean(self):
         self.stop_with_unfinished_work_and_an_answer()
         self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede")

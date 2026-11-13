@@ -277,7 +277,9 @@ def _carry_from(home, old, archive):
     (never a commit; the new run's red, gates and review run normally).
     The old red test is left out of the patch."""
     carried = {"from": archive, "patch": None,
-               "answers": list((old.get("carried") or {}).get("answers") or [])}
+               "answers": list((old.get("carried") or {}).get("answers") or []),
+               "open_questions": [e["question"] for e in old.get("escalations") or []
+                                  if e["answer"] is None]}
     carried["answers"] += [{"question": e["question"], "answer": e["answer"]}
                            for e in old.get("escalations") or [] if e["answer"] is not None]
     if os.path.isdir(old["worktree"]):
@@ -456,6 +458,7 @@ def cmd_context(args):
         if run["red"] else None,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
+        "carried_open_questions": (run.get("carried") or {}).get("open_questions", []),
         "human_responses": (run.get("carried") or {}).get("answers", []) + [
             {"question": e["question"], "answer": e["answer"]}
             for e in run.get("escalations") or [] if e["answer"] is not None
