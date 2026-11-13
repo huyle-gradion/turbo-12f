@@ -8,6 +8,8 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 
 WORKSPACE = "t12-workspace.json"
 TRUNK = "t12-trunk"
@@ -184,6 +186,45 @@ def cmd_status(args):
     return 0
 
 
+def read_board(work):
+    r = subprocess.run([os.path.join(work, "factory", "bin", "t12"), "board", "--home",
+                        os.path.join(work, "state"), "--json"], capture_output=True, text=True)
+    return json.loads(r.stdout) if r.returncode == 0 else []
+
+
+def cmd_run(args):
+    ws = load_workspace()
+    work = ws["work_dir"]
+    state, queue = os.path.join(work, "state"), os.path.join(work, "state", "queue")
+    queued = [f for f in os.listdir(queue) if f.endswith(".json")] if os.path.isdir(queue) else []
+    if not queued and not read_board(work):
+        print("Nothing to run: the queue is empty and no runs are active; add work with `t12-wizard take <issue number>`.")
+        return 0
+    interval = float(os.environ.get("T12_WIZARD_PROGRESS_SECS", "60"))
+    cmd = [sys.executable, os.path.join(work, "factory", "adapters", "runner.py"),
+           "--home", state, "--queue", queue, "--model-cmd", ws["model_cmd"]]
+    with tempfile.TemporaryFile("w+") as err:
+        proc = subprocess.Popen(cmd, stderr=err, text=True)
+        steps = {}
+        while True:
+            try:
+                proc.wait(timeout=interval)
+                break
+            except subprocess.TimeoutExpired:
+                now = time.monotonic()
+                for row in read_board(work):
+                    if not row.get("busy"):
+                        continue
+                    step = (row["task_id"], row.get("next"))
+                    secs = int(now - steps.setdefault(step, now - interval))
+                    print(f"{row['task_id']}: {row.get('next') or row['phase']}, running for {secs}s", flush=True)
+        err.seek(0)
+        detail = err.read().strip()
+    if proc.returncode != 0:
+        sys.exit(f"the runner failed (exit {proc.returncode}):\n{detail}\nretry: t12-wizard run")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     p = argparse.ArgumentParser(prog="t12-wizard")
@@ -194,13 +235,14 @@ def main():
     s.add_argument("--factory-repo", default=DEFAULT_FACTORY)
     s.add_argument("--yes", action="store_true")
     sub.add_parser("status")
+    sub.add_parser("run")
     t = sub.add_parser("take")
     t.add_argument("issues", nargs="+", type=int)
     args = p.parse_args(argv)
     if args.command != "setup":
         if not os.path.exists(WORKSPACE):
             sys.exit("no workspace here; run setup first (`t12-wizard setup`)")
-        return {"take": cmd_take, "status": cmd_status}[args.command](args)
+        return {"take": cmd_take, "status": cmd_status, "run": cmd_run}[args.command](args)
     retry = "t12-wizard " + shlex.join(argv)
     try:
         cmd_setup(args, retry)
