@@ -5,21 +5,20 @@ labels: []
 ---
 
 ### Summary
-What is wrong or missing, in two or three sentences. Name the file and function. Do not use HTML comments: intake refuses them.
+What is wrong or missing, in two or three sentences. Do not use HTML comments: intake refuses them.
+
+### Pointers
+The file and function to change, and an existing test to copy the style from.
 
 ### Decisions
-Every choice already made. Leave no "Open questions" section.
+Every choice already made. Delete this section if there are none. Never add an "Open questions" section: intake refuses it.
 
 ### Acceptance criteria
-- [ ] Happy path: given X, when Y, then Z.
-- [ ] Error / failure: given X, when Y, then Z.
-- [ ] Edge inputs: given X, when Y, then Z.
-
-### Manual checks
-Anything that needs a live system, network or a real model. Not a criterion.
+- [ ] Main path: given X, when Y, then Z.
+- [ ] Failure: given X, when Y, then Z.
+- [ ] Edge input: given X, when Y, then Z.
 
 ### Out of scope
-What the builder must not touch.
+What the builder must not change.
 
-Touches: path/one, tests/test_one.py
-Depends on: #123
+Touches: path/one.py, tests/test_one.py

@@ -25,7 +25,10 @@ context below. The test must:
   a local bare repository. The gate runs with `GIT_ALLOW_PROTOCOL=none`,
   so those commands fail with exit 128 and every test that depends on
   them errors in `setUp`. Local `git init`, `add` and `commit` work.
-  Stub the code that pushes, or inject a fake runner for it.
+  Stub the code that pushes, or inject a fake runner for it;
+- never call a live model or an agent CLI, and never read the user's
+  home directory or credentials. Inject a fake for the model call, and
+  give the code under test a temporary directory as its home.
 
 ## Defects an earlier attempt found
 
