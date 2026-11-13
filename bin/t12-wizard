@@ -125,11 +125,14 @@ def cmd_take(args):
     if subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:
         sys.exit("no forge login found; run `gh auth login` and retry")
     repo, work = slug(ws["product_repo"]), ws["work_dir"]
+    labelled = []
     for n in args.issues:
         r = subprocess.run(["gh", "issue", "edit", str(n), "-R", repo, "--add-label", LABEL],
                            capture_output=True, text=True)
         if r.returncode != 0:
-            sys.exit(f"could not label issue {n}: {(r.stderr or r.stdout).strip()}")
+            done = f"; labelled but not run through intake: {', '.join(map(str, labelled))}" if labelled else ""
+            sys.exit(f"could not label issue {n}: {(r.stderr or r.stdout).strip()}{done}")
+        labelled.append(n)
     token = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True).stdout.strip()
     state = os.path.join(work, "state")
     adapter = os.path.join(work, "factory", "adapters", "github-issues.py")
@@ -138,13 +141,15 @@ def cmd_take(args):
                        capture_output=True, text=True, env={**os.environ, "GITHUB_TOKEN": token})
     results = {}
     for line in r.stdout.splitlines():
-        m = re.match(r"(wrote|skipped) \S*?(\d+)(?::\s*(.*))?$", line.strip())
+        m = re.match(r"(wrote|skipped|unchanged|has-run) \S*?(\d+)(?::\s*(.*))?$", line.strip())
         if m:
             results[int(m.group(2))] = (m.group(1), m.group(3) or "")
     for n in args.issues:
         verb, rest = results.get(n, (None, ""))
-        if verb == "wrote":
+        if verb in ("wrote", "unchanged"):
             print(f"issue {n}: queued")
+        elif verb == "has-run":
+            print(f"issue {n}: skipped: {rest}")
         elif verb == "skipped":
             print(f"issue {n}: skipped: {rest}")
         else:
