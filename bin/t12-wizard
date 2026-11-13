@@ -4,6 +4,7 @@
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -114,6 +115,75 @@ def cmd_setup(args, retry):
     print(f"workspace ready: {ws_path}")
 
 
+def load_workspace():
+    with open(WORKSPACE) as f:
+        return json.load(f)
+
+
+def cmd_take(args):
+    ws = load_workspace()
+    if subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:
+        sys.exit("no forge login found; run `gh auth login` and retry")
+    repo, work = slug(ws["product_repo"]), ws["work_dir"]
+    labelled = []
+    for n in args.issues:
+        r = subprocess.run(["gh", "issue", "edit", str(n), "-R", repo, "--add-label", LABEL],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            done = f"; labelled but not run through intake: {', '.join(map(str, labelled))}" if labelled else ""
+            sys.exit(f"could not label issue {n}: {(r.stderr or r.stdout).strip()}{done}")
+        labelled.append(n)
+    token = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True).stdout.strip()
+    state = os.path.join(work, "state")
+    adapter = os.path.join(work, "factory", "adapters", "github-issues.py")
+    r = subprocess.run([sys.executable, adapter, "intake", "--repo", repo, "--label", LABEL,
+                        "--out-dir", os.path.join(state, "queue"), "--home", state],
+                       capture_output=True, text=True, env={**os.environ, "GITHUB_TOKEN": token})
+    results = {}
+    for line in r.stdout.splitlines():
+        m = re.match(r"(wrote|skipped|unchanged|has-run) \S*?(\d+)(?::\s*(.*))?$", line.strip())
+        if m:
+            results[int(m.group(2))] = (m.group(1), m.group(3) or "")
+    for n in args.issues:
+        verb, rest = results.get(n, (None, ""))
+        if verb in ("wrote", "unchanged"):
+            print(f"issue {n}: queued")
+        elif verb == "has-run":
+            print(f"issue {n}: skipped: {rest}")
+        elif verb == "skipped":
+            print(f"issue {n}: skipped: {rest}")
+        else:
+            print(f"issue {n}: not queued; intake said: {(r.stderr or r.stdout).strip() or 'nothing'}")
+    return 0 if r.returncode == 0 else 1
+
+
+def sentence(row):
+    task, nxt = row["task_id"], row.get("next") or ""
+    if nxt == "human: merge":
+        return f"{task}: finished and verified; deliver it."
+    if nxt.startswith("human: answer"):
+        return f"{task}: waiting for you; answer {nxt[len('human: answer'):].strip()}."
+    if nxt.startswith("stopped"):
+        return f"{task}: stopped ({nxt.partition(':')[2].strip() or row['phase']}); report it."
+    if nxt.startswith("human"):
+        return f"{task}: waiting for you; {nxt.partition(':')[2].strip()}."
+    return f"{task}: still in progress ({row['phase']}); rerun the factory to keep it moving."
+
+
+def cmd_status(args):
+    work = load_workspace()["work_dir"]
+    r = subprocess.run([os.path.join(work, "factory", "bin", "t12"), "board", "--home",
+                        os.path.join(work, "state"), "--json"], capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit("could not read the board: " + (r.stderr or r.stdout).strip())
+    rows = json.loads(r.stdout)
+    if not rows:
+        print("No runs yet; start one with `t12-wizard take <issue number>`.")
+    for row in rows:
+        print(sentence(row))
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     p = argparse.ArgumentParser(prog="t12-wizard")
@@ -124,11 +194,13 @@ def main():
     s.add_argument("--factory-repo", default=DEFAULT_FACTORY)
     s.add_argument("--yes", action="store_true")
     sub.add_parser("status")
+    t = sub.add_parser("take")
+    t.add_argument("issues", nargs="+", type=int)
     args = p.parse_args(argv)
     if args.command != "setup":
         if not os.path.exists(WORKSPACE):
             sys.exit("no workspace here; run setup first (`t12-wizard setup`)")
-        return
+        return {"take": cmd_take, "status": cmd_status}[args.command](args)
     retry = "t12-wizard " + shlex.join(argv)
     try:
         cmd_setup(args, retry)
@@ -137,4 +209,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
