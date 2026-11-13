@@ -6,6 +6,7 @@ re-run changes nothing, and a failed listing writes nothing.
 
 import json
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -28,7 +29,7 @@ CAGED = "binding loopback TCP is denied here, as inside a t12 verification cage"
 LOOPBACK_DENIED = _loopback_denied()
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GOOD_BODY = """Greeting is wrong.
+CRITERIA_BODY = """Greeting is wrong.
 
 ### Acceptance criteria
 - [ ] greet('Ana') returns 'Hello, Ana!'
@@ -37,6 +38,11 @@ GOOD_BODY = """Greeting is wrong.
 ### Notes
 - not a criterion
 """
+GOOD_BODY = CRITERIA_BODY + "\nTouches: greet.py\n"
+
+
+def criteria(n):
+    return "### Acceptance criteria\n" + "".join(f"- case {i}\n" for i in range(n)) + "Touches: a.py\n"
 
 
 def issue(number, body=GOOD_BODY, title="Fix greet", labels=("factory",), **extra):
@@ -69,6 +75,9 @@ class FakeIssues(BaseHTTPRequestHandler):
             status = 500
         if status:
             return self._send(status, {"message": "boom"})
+        blocked = re.fullmatch(r"/repos/o/r/issues/(\d+)/dependencies/blocked_by", path)
+        if blocked and blocked.group(1) in scenario.get("blocked_by", {}):
+            return self._send(200, scenario["blocked_by"][blocked.group(1)])
         if path in ("/repos/o/r/issues", "/api/v4/projects/g/sub/p/issues"):
             issues = scenario.get("issues", [])
             return self._send(200, issues[(page - 1) * per_page:page * per_page])
@@ -133,18 +142,75 @@ class GitHubIntake(IntakeCase):
                                     "greet() returns 'Hello, world!'"],
             "source": {"adapter": "github-issues", "ref": "o/r#12",
                        "url": "https://github.example/o/r/issues/12"},
+            "touches": ["greet.py"],
         })
         self.assertEqual(result.stdout.splitlines(),
                          [f"wrote gh-12: {os.path.join(self.out, 'gh-12.json')}"])
         path, query = FakeIssues.REQUESTS[0]
         self.assertEqual((path, query["labels"], query["state"]), ("/repos/o/r/issues", "factory", "open"))
 
-    def test_touches_and_depends_on_come_from_labelled_lines(self):
-        body = GOOD_BODY + "\nTouches: src/auth, ./tests/auth\nDepends on: #3, gh-4\n"
+    def test_touches_comes_from_its_labelled_line(self):
+        body = CRITERIA_BODY + "\nTouches: src/auth, ./tests/auth\n"
         self.intake([issue(12, body)], ["--label", "factory"])
-        task = self.task("gh-12.json")
-        self.assertEqual(task["touches"], ["src/auth", "tests/auth"])
-        self.assertEqual(task["depends_on"], ["gh-3", "gh-4"])
+        self.assertEqual(self.task("gh-12.json")["touches"], ["src/auth", "tests/auth"])
+
+    def test_an_issue_without_touches_is_skipped(self):
+        result = self.intake([issue(1, CRITERIA_BODY)], ["--label", "factory"])
+        self.assertEqual(self.files(), [])
+        self.assertIn("skipped gh-1: Touches must list", result.stdout)
+
+    def test_a_depends_on_line_is_refused_on_github(self):
+        result = self.intake([issue(1, GOOD_BODY + "Depends on: #3\n")], ["--label", "factory"])
+        self.assertEqual(self.files(), [])
+        self.assertIn('native "blocked by"', result.stdout)
+
+    def test_more_than_ten_criteria_is_refused_and_seven_warns(self):
+        result = self.intake([issue(1, criteria(11)), issue(2, criteria(7)), issue(3, criteria(6))],
+                             ["--label", "factory"])
+        self.assertEqual(self.files(), ["gh-2.json", "gh-3.json"])
+        self.assertIn("skipped gh-1: 11 acceptance criteria, more than 10", result.stdout)
+        self.assertIn("warning gh-2: 7 acceptance criteria", result.stdout)
+        self.assertNotIn("gh-3: 6", result.stdout)
+
+    def test_open_questions_are_refused(self):
+        bodies = [GOOD_BODY + "\n### Open questions\n- which name?\n",
+                  GOOD_BODY + "\n_Open question: which name?_\n",
+                  GOOD_BODY + "\n### Open questions\nNone.\n",
+                  GOOD_BODY + "\n_Open question: none._\n"]
+        result = self.intake([issue(n, b) for n, b in enumerate(bodies, 1)], ["--label", "factory"])
+        self.assertEqual(self.files(), ["gh-3.json", "gh-4.json"])
+        self.assertIn("skipped gh-1: open questions are left", result.stdout)
+        self.assertIn("skipped gh-2: open questions are left", result.stdout)
+
+    def test_a_parent_with_sub_issues_is_refused(self):
+        result = self.intake([issue(1, sub_issues_summary={"total": 2})], ["--label", "factory"])
+        self.assertEqual(self.files(), [])
+        self.assertIn("skipped gh-1: it has 2 sub-issue(s)", result.stdout)
+
+    def test_native_blocked_by_sets_the_order(self):
+        def blocker(number, state="open", reason=None, repo="o/r"):
+            return {"number": number, "state": state, "state_reason": reason,
+                    "repository_url": f"https://api.github.example/repos/{repo}"}
+        blocked = {"issue_dependencies_summary": {"total_blocked_by": 2}}
+        result = self.intake(
+            [issue(1, **blocked), issue(2, **blocked), issue(3, **blocked), issue(4)],
+            ["--label", "factory"],
+            scenario={"blocked_by": {
+                "1": [blocker(4), blocker(9, "closed", "completed")],
+                "2": [blocker(9, "closed", "not_planned")],
+                "3": [blocker(5, repo="other/r")]}})
+        self.assertEqual(self.files(), ["gh-1.json", "gh-4.json"])
+        self.assertEqual(self.task("gh-1.json")["depends_on"], ["gh-4"])
+        self.assertNotIn("depends_on", self.task("gh-4.json"))
+        self.assertIn("skipped gh-2: it is blocked by o/r#9, which was closed without landing",
+                      result.stdout)
+        self.assertIn("skipped gh-3: it is blocked by other/r#5 in another repository",
+                      result.stdout)
+
+    def test_a_failed_blocked_by_read_writes_nothing(self):
+        blocked = {"issue_dependencies_summary": {"total_blocked_by": 1}}
+        self.intake([issue(1, **blocked), issue(2)], ["--label", "factory"], expect=1)
+        self.assertEqual(self.files(), [])
 
     def test_an_issue_without_criteria_is_skipped_with_the_reason(self):
         bodies = ["", "just words", "### Acceptance criteria\nsee the thread\n",
@@ -160,7 +226,7 @@ class GitHubIntake(IntakeCase):
     def test_what_the_core_would_refuse_is_not_written(self):
         for n, line in enumerate(("Touches: ../outside", "Touches: /etc", "Touches: .git/hooks",
                                   "Touches:", "Depends on: no$pe", "Depends on: gh-1"), 1):
-            self.intake([issue(1, GOOD_BODY + f"\n{line}\n")], ["--label", "factory"])
+            self.intake([issue(1, CRITERIA_BODY + f"\n{line}\n")], ["--label", "factory"])
             self.assertEqual(self.files(), [], line)
 
     def test_an_issue_with_an_html_comment_is_skipped(self):
@@ -171,12 +237,12 @@ class GitHubIntake(IntakeCase):
             self.assertIn("contains an HTML comment", result.stdout, comment)
 
     def test_every_line_is_read_including_fenced_ones(self):
-        body = GOOD_BODY + "```x`\nTouches: docs/\n```\n"
+        body = CRITERIA_BODY + "```x`\nTouches: docs/\n```\n"
         self.intake([issue(1, body)], ["--label", "factory"])
         self.assertEqual(self.task("gh-1.json")["touches"], ["docs"])
 
     def test_a_criteria_heading_may_carry_a_note(self):
-        self.intake([issue(1, "## Acceptance Criteria (Testable)\n- works\n")], ["--label", "factory"])
+        self.intake([issue(1, "## Acceptance Criteria (Testable)\n- works\nTouches: a.py\n")], ["--label", "factory"])
         self.assertEqual(self.task("gh-1.json")["acceptance_criteria"], ["works"])
 
     def test_profile_controlled_keys_in_an_issue_never_reach_the_task(self):
@@ -196,7 +262,7 @@ intake: {"adapter": "evil"}
         self.intake([issue(5, body)], ["--label", "factory"])
         self.assertEqual(self.files(), ["gh-5.json"])
         task = self.task("gh-5.json")
-        self.assertEqual(set(task), {"id", "title", "acceptance_criteria", "source"})
+        self.assertEqual(set(task), {"id", "title", "acceptance_criteria", "source", "touches"})
         self.assertEqual(task["id"], "gh-5")
         self.assertEqual(task["source"]["adapter"], "github-issues")
 
@@ -419,12 +485,46 @@ class GitLabIntake(IntakeCase):
             "url": "https://gitlab.example/g/sub/p/-/issues/7"})
         self.assertEqual(FakeIssues.REQUESTS[0][1]["state"], "opened")
 
+    def test_depends_on_text_is_read_where_the_forge_has_no_native_relation(self):
+        self.gitlab([{"iid": 7, "title": "t", "description": GOOD_BODY + "Depends on: #3, gl-4\n",
+                      "labels": ["factory"]}])
+        self.assertEqual(self.task("gl-7.json")["depends_on"], ["gl-3", "gl-4"])
+
     def test_a_failed_listing_writes_nothing_and_fails(self):
         for status in (403, 500):
             result = self.gitlab([{"iid": 7, "title": "t", "description": GOOD_BODY,
                                    "labels": ["factory"]}], expect=1, scenario={"status": status})
             self.assertIn("nothing written", result.stderr)
             self.assertEqual(self.files(), [])
+
+
+class SpecCheckCommand(unittest.TestCase):
+    """The command the factory-spec skill runs on a draft, before filing."""
+
+    def check(self, body, *args):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "src"))
+            open(os.path.join(root, "src", "old.py"), "w").close()
+            result = subprocess.run(
+                ["python3", os.path.join(ROOT, "adapters", "common.py"), "spec-check",
+                 "--repo-root", root, *args],
+                input=body, capture_output=True, text=True, timeout=60)
+        return result.returncode, json.loads(result.stdout)
+
+    def test_a_ready_draft_passes_and_new_files_are_reported(self):
+        code, out = self.check(CRITERIA_BODY + "Touches: src/old.py, src/new.py\n")
+        self.assertEqual((code, out["ok"], out["refusals"]), (0, True, []))
+        self.assertEqual(out["new_files"], ["src/new.py"])
+
+    def test_a_draft_is_refused_with_every_reason(self):
+        code, out = self.check("### Open questions\n- which?\n")
+        self.assertEqual((code, out["ok"]), (1, False))
+        self.assertEqual(len(out["refusals"]), 3, out["refusals"])
+
+    def test_depends_on_text_depends_on_the_forge(self):
+        body = GOOD_BODY + "Depends on: #3\n"
+        self.assertEqual(self.check(body)[0], 1)
+        self.assertEqual(self.check(body, "--forge", "gitlab")[0], 0)
 
 
 class IntakeToRun(IntakeCase):
@@ -463,7 +563,7 @@ class IntakeToRun(IntakeCase):
 
     def test_an_issue_becomes_a_prepared_run_that_carries_its_source(self):
         config = os.path.join(self.repo, ".t12", "project.json")
-        self.intake([issue(12, GOOD_BODY + "\nTouches: app.py\n"), issue(13, "no criteria")],
+        self.intake([issue(12, CRITERIA_BODY + "\nTouches: app.py\n"), issue(13, "no criteria")],
                     ["--repo-config", config, "--home", self.home])
         self.assertEqual(self.queue(), ["started gh-12"])
         with open(os.path.join(self.home, "runs", "gh-12.json")) as fh:

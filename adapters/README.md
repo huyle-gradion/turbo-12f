@@ -140,22 +140,41 @@ label, and forges disagree on what an odd comment or fence hides, so
 intake does not guess. Every other line is read, code fences
 included; visible text in a code block can only narrow a task.
 An issue without such a list is skipped and the reason is printed;
-intake never invents criteria. Two optional lines, anywhere, and only
-as `Name: value`:
+intake never invents criteria.
+
+Intake runs `spec_check` in `common.py`, the rules of
+`docs/spec-standard.md` that code can check, and skips an issue that
+breaks one, printing every reason: more than 10 criteria (7 to 10 print
+a `warning` line and still queue), no `Touches:` line, an "Open
+questions" section or `_Open question:` line that is not `none`, or a
+parent issue (one with sub-issues). Labelled lines are read anywhere,
+only as `Name: value`:
 
 ```text
 Touches: src/auth, tests/auth
-Depends on: #12, gh-14
+Depends on: #12, gl-14
 ```
 
 `Touches` becomes the task's `touches` (relative paths, no spaces).
-`Depends on` becomes `depends_on`; `#N` means `<prefix>-N` of the
-same adapter. A malformed value skips the issue, because dropping it
-would widen the task.
+Order comes from the forge's native relations where it has them. On
+GitHub intake reads each issue's "blocked by" issues: an open one
+becomes `depends_on`, a completed one has landed and is dropped, and
+one closed as not planned or in another repository skips the issue. A
+`Depends on:` line is refused on GitHub. GitLab and Asana intake read
+it, since their native dependencies are paid features; `#N` means
+`<prefix>-N` of the same adapter. A malformed value skips the issue,
+because dropping it would widen the task.
+
+**Checking a draft.** `python3 adapters/common.py spec-check
+[BODY|-] [--forge github|gitlab|asana] [--repo-root DIR]` runs the same
+body rules before an issue is filed and prints JSON
+`{ok, refusals, warnings, new_files}`; it exits 1 when intake would
+refuse the body. `new_files` lists `Touches` paths missing from
+`--repo-root`, reported, never refused.
 
 **What the task file holds.** Only `id`, `title`,
 `acceptance_criteria`, `source` (`{"adapter", "ref", "url"}`, ref is
-`owner/name#number`), and the two optional fields above. The adapter
+`owner/name#number`), `touches`, and `depends_on` when there is one. The adapter
 builds it from that list and never copies a key out of an issue, so
 `gates`, `required_reviews`, `sandbox_*`, `verify_deps`, budgets,
 `roles` and paths cannot arrive through an issue; they come from the
