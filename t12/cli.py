@@ -503,6 +503,25 @@ def _reported_failing(name, output):
                for line in output.splitlines())
 
 
+_SETUP_FRAME = re.compile(r'^\s*File ".*", line \d+, in (setUp|setUpClass|setUpModule|setup_method)\b', re.M)
+
+
+def _setup_errored(name, output):
+    """True when the test errored before its body ran: unittest's traceback
+    for it passes through a setUp-style frame and never enters the test,
+    or pytest says `ERROR at setup of`."""
+    short = _short_test_name(name)
+    if re.search(rf"ERROR at setup of (?:\S*::)?{re.escape(short)}\b", output):
+        return True
+    for block in re.split(r"^={20,}$", output, flags=re.M):
+        header = block.strip().splitlines()[:1]
+        if not header or not header[0].startswith("ERROR: ") or not _names_test(name, header[0]):
+            continue
+        if _SETUP_FRAME.search(block) and not re.search(rf"in {re.escape(short)}\s*$", block, re.M):
+            return True
+    return False
+
+
 def cmd_red(args):
     home = _home(args)
     run = _run(home, args.task_id)
@@ -569,6 +588,17 @@ def cmd_red(args):
             "output": combined[-4000:],
         })
         raise StateError(f"refusing red: covered tests do not fail at the red commit: {passing}")
+    broken = [t for t in covered if _setup_errored(t, combined)]
+    if broken:
+        _save(home, run, "red-failed", {
+            "step": "red", "exit_code": obs["exit_code"],
+            "output": combined[-4000:],
+        })
+        raise StateError(
+            f"refusing red: covered tests errored in test setup (setUp, setUpClass or a fixture), "
+            f"so they never ran their assertions: {broken}. Fix the setup; "
+            "a red test must fail in its body"
+        )
     ref = evidence.write_observation(home, run["task_id"], "red-output.txt", obs)
     gitio.move_branch_to(wt, commit)
     run["red"] = {
