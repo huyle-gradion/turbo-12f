@@ -268,6 +268,22 @@ class CliCase(unittest.TestCase):
         self.assertIn("test_x", result.stderr)
         self.assertEqual(self.phase(), "ready")
 
+    def test_a_setup_that_loads_code_not_written_yet_is_a_valid_red(self):
+        for exc, name in (("FileNotFoundError('adapters/new.py')", "test_setup_nofile"),
+                          ("ImportError('no module new')", "test_setup_import")):
+            source = (
+                "import unittest\n"
+                "class T(unittest.TestCase):\n"
+                "    def setUp(self):\n"
+                f"        raise {exc}\n"
+                "    def test_x(self):\n"
+                "        self.assertTrue(True)\n"
+            )
+            self.red_with(source, name, expect=0)
+            self.assertEqual(self.phase(), "red", name)
+            self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "next case")
+            self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede")
+
     def test_a_missing_code_error_in_the_test_body_is_a_valid_red(self):
         source = (
             "import unittest\n"

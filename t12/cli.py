@@ -548,10 +548,26 @@ def _reported_failing(name, output):
 _SETUP_FRAME = re.compile(r'^\s*File ".*", line \d+, in (setUp|setUpClass|setUpModule|setup_method)\b', re.M)
 
 
+_MISSING_CODE = {"ImportError", "ModuleNotFoundError", "AttributeError", "NameError",
+                 "FileNotFoundError"}
+
+
+def _raised_type(block):
+    """The exception class on the last traceback line of a unittest block."""
+    last = None
+    for line in block.splitlines():
+        found = re.match(r"^([A-Za-z_][\w.]*(?:Error|Exception))\b", line)
+        if found:
+            last = found.group(1).split(".")[-1]
+    return last
+
+
 def _setup_errored(name, output):
-    """True when the test errored before its body ran: unittest's traceback
-    for it passes through a setUp-style frame and never enters the test,
-    or pytest says `ERROR at setup of`."""
+    """True when the test errored before its body ran for a reason that is
+    not just the code under test being absent: unittest's traceback for it
+    passes through a setUp-style frame and never enters the test, or pytest
+    says `ERROR at setup of`. A setUp that fails to load code not written
+    yet (ImportError, a missing file) is a valid red, as in the test body."""
     short = _short_test_name(name)
     if re.search(rf"ERROR at setup of (?:\S*::)?{re.escape(short)}\b", output):
         return True
@@ -559,7 +575,8 @@ def _setup_errored(name, output):
         header = block.strip().splitlines()[:1]
         if not header or not header[0].startswith("ERROR: ") or not _names_test(name, header[0]):
             continue
-        if _SETUP_FRAME.search(block) and not re.search(rf"in {re.escape(short)}\s*$", block, re.M):
+        if (_SETUP_FRAME.search(block) and not re.search(rf"in {re.escape(short)}\s*$", block, re.M)
+                and _raised_type(block) not in _MISSING_CODE):
             return True
     return False
 
