@@ -129,14 +129,16 @@ def with_schema(model_cmd, cli, schema_path, result_path):
         return [model_cmd[0], "--output-format", "json", "--json-schema", schema,
                 *model_cmd[1:]]
     if cli == "agy":
-        return [model_cmd[0], "--json-schema", schema, *model_cmd[1:]]
+        # agy rejects --json-schema unless the output format is json.
+        return [model_cmd[0], "--output-format", "json", "--json-schema", schema,
+                *model_cmd[1:]]
     return [*model_cmd[:2], "--output-schema", schema_path, "-o", result_path,
             *model_cmd[2:]]
 
 
 def structured_result(cli, stdout, result_path):
     """(the tool call the CLI enforced or None, the reply's text)."""
-    if cli == "claude":
+    if cli in ("claude", "agy"):
         try:
             envelope = json.loads(stdout)
         except ValueError:
@@ -144,7 +146,7 @@ def structured_result(cli, stdout, result_path):
         if not isinstance(envelope, dict):
             return None, stdout
         result = envelope.get("structured_output")
-        text = envelope.get("result")
+        text = envelope.get("result" if cli == "claude" else "response")
         return (json.dumps(result) if isinstance(result, dict) else None,
                 text if isinstance(text, str) else stdout)
     try:
