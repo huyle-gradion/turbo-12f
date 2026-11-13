@@ -114,6 +114,9 @@ def main(argv=None):
         return 2
     run = read_run(args.home, args.task_id)
     gid = args.task or run.get("asana_task_gid")
+    source = run.get("source") or {}
+    if not gid and source.get("adapter") == "asana-tasks":
+        gid = str(source.get("ref") or "").rpartition("#")[2] or None
     if not gid:
         print("error: cannot determine the Asana task; pass --task or set asana_task_gid in the task",
               file=sys.stderr)

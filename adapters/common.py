@@ -246,6 +246,7 @@ def write_report(path, data):
 
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*?)\s*#*\s*$")
+PLAIN_HEADING_RE = re.compile(r"^\s{0,3}(acceptance criteria):?\s*$", re.I)
 CRITERIA_HEADING_RE = re.compile(r"^acceptance criteria\b", re.I)
 ITEM_RE = re.compile(r"^\s*[-*]\s+(?:\[[ xX]\]\s+)?(.+?)\s*$")
 LABELLED_RE = re.compile(r"^\s*(touches|depends[ _-]?on)\s*:\s*(.*?)\s*$", re.I)
@@ -273,7 +274,7 @@ def parse_body(body, id_prefix):
     criteria, in_section, seen = [], False, False
     labelled = {}
     for line in (body or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        heading = HEADING_RE.match(line)
+        heading = HEADING_RE.match(line) or PLAIN_HEADING_RE.match(line)
         if heading:
             in_section = not seen and bool(CRITERIA_HEADING_RE.match(heading.group(1)))
             seen = seen or in_section
@@ -325,6 +326,8 @@ def issue_to_task(issue, adapter, repo, id_prefix):
         problem = "the issue depends on itself"
     if problem:
         return task_id, None, problem
+    if issue.get("depends_on"):
+        fields["depends_on"] = sorted(set(fields.get("depends_on", [])) | set(issue["depends_on"]))
     task = {
         "id": task_id,
         "title": title,
@@ -443,10 +446,12 @@ def _withdraw(listed, adapter, repo, out_dir, home):
         print(f"withdrawn {task_id}: {entry.path}")
 
 
-def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=None):
+def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=None,
+                scope=("repo", "label")):
     """Shared `intake` command. list_issues(args, repo, label, token)
-    returns normalised issues (number, title, body, url) or raises
-    IntakeError. Exit 0: every issue was handled. 1: the listing
+    returns normalised issues (number, title, body, url, and optionally
+    depends_on task ids) or raises IntakeError. `scope` names the two
+    settings (flag and profile key) that select what to list. Exit 0: every issue was handled. 1: the listing
     failed, nothing written. 2: the adapter could not run."""
     parser = argparse.ArgumentParser(description=f"{name} intake adapter")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -457,8 +462,8 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
                    "instead of --repo-config")
     p.add_argument("--out-dir", required=True, help="queue directory bin/t12-queue reads")
     p.add_argument("--home", help="state home; a task with a run there is left alone")
-    p.add_argument("--repo", help="owner/name, overriding the profile")
-    p.add_argument("--label", help="only issues with this label, overriding the profile")
+    p.add_argument(f"--{scope[0]}", help=f"{scope[0]}, overriding the profile")
+    p.add_argument(f"--{scope[1]}", help=f"only issues with this {scope[1]}, overriding the profile")
     if add_arguments:
         add_arguments(p)
     args = parser.parse_args(argv)
@@ -472,13 +477,13 @@ def intake_main(argv, name, id_prefix, token_env, list_issues, add_arguments=Non
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    repo = args.repo or profile.get("repo")
-    label = args.label or profile.get("label")
+    repo = getattr(args, scope[0]) or profile.get(scope[0])
+    label = getattr(args, scope[1]) or profile.get(scope[1])
     if not repo or not label:
         # Anyone can file an issue; the label is what a maintainer
         # applies to say "the factory may work on this".
-        print("error: give --repo and --label, or an `intake` key in --repo-config; "
-              "without a label every open issue would become a task", file=sys.stderr)
+        print(f"error: give --{scope[0]} and --{scope[1]}, or an `intake` key in --repo-config; "
+              f"without a {scope[1]} every open issue would become a task", file=sys.stderr)
         return 2
     try:
         issues = list_issues(args, repo, label, token)
