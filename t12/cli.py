@@ -691,15 +691,25 @@ def cmd_stage(args):
     review = model.changes_requested(run)
     if review is not None and candidate == review["commit"]:
         model.bump_op(run)
-        _save(home, run, "stage-refused", {
-            "reason": "no new commit after changes requested",
-            "review": review["report"]["name"], "commit": candidate[:12],
-        })
-        raise StateError(
+        message = (
             f"refusing stage: the {review['role']} review ({review['report']['name']}) "
             f"asked for changes on {candidate[:12]} and no new commit was made — "
             "address its findings, commit, then stage"
         )
+        with open(review["report"]["path"], encoding="utf-8", errors="replace") as fh:
+            report_text = fh.read()
+        question = f"{message}\n\nReview report:\n\n{report_text}"
+        run["prior_phase"] = run["phase"]
+        run.setdefault("escalations", []).append({
+            "question": question, "asked_at": time.time(),
+            "answer": None, "answered_at": None,
+        })
+        model.transition(run, "paused")
+        _save(home, run, "stage-refused", {
+            "reason": "no new commit after changes requested",
+            "review": review["report"]["name"], "commit": candidate[:12],
+        })
+        raise StateError(message)
     if candidate == run["red"]["commit"]:
         raise StateError("refusing stage: no implementation commit after the red commit")
     if not gitio.is_ancestor(wt, run["red"]["commit"], candidate):
