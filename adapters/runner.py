@@ -188,13 +188,21 @@ def tool_call(cli, output, result_path):
     return (extracted, "extracted") if extracted is not None else (output, "raw")
 
 
+def context_json(stdout):
+    """The context JSON after the last marker line. The marker must end the
+    line: a context string (a carried patch, a prompt quoting this code) can
+    hold the marker text, but JSON escapes its newlines, so only the real
+    marker line is followed by a raw one."""
+    return json.loads(stdout.rsplit(CONTEXT_MARKER + "\n", 1)[1])
+
+
 def worker_step(home, row, role, model_cmd, scratch):
     task_id = row["task_id"]
     ctx = t12("context", "--home", home, "--task-id", task_id,
               "--role", role, "--phase", row["phase"])
     if ctx.returncode != 0:
         return f"context failed: {ctx.stderr.strip()}"
-    worktree = json.loads(ctx.stdout.rsplit(CONTEXT_MARKER, 1)[1])["worktree"]
+    worktree = context_json(ctx.stdout)["worktree"]
     session = f"{role}-{uuid.uuid4().hex[:16]}"
     env = dict(os.environ, T12_TASK_ID=task_id, T12_ROLE=role, T12_SESSION=session,
                T12_WORKTREE=worktree)
