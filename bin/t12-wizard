@@ -225,6 +225,68 @@ def cmd_run(args):
     return 0
 
 
+def load_run(work, n):
+    path = os.path.join(work, "state", "runs", f"gh-{n}.json")
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except OSError:
+        sys.exit(f"no run for issue {n}; start one with `t12-wizard take {n}`")
+
+
+def cmd_answer(args):
+    work = load_workspace()["work_dir"]
+    run_rec = load_run(work, args.issue)
+    asked = (run_rec.get("escalations") or [{}])[-1]
+    if not asked.get("question") or asked.get("answer") is not None:
+        sys.exit(f"gh-{args.issue} has no open question (phase: {run_rec['phase']})")
+    print(asked["question"])
+    answer = args.answer
+    if answer is None:
+        try:
+            answer = input("Your answer: ").strip()
+        except EOFError:
+            answer = ""
+    if not answer:
+        sys.exit("no answer given; nothing recorded. Type one, or pass --answer TEXT")
+    r = subprocess.run([os.path.join(work, "factory", "bin", "t12"), "resume", "--home",
+                        os.path.join(work, "state"), "--task-id", f"gh-{args.issue}", "--answer", answer],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        sys.exit("could not record the answer: " + (r.stderr or r.stdout).strip())
+    print(f"answer recorded for gh-{args.issue}; rerun the factory with `t12-wizard run`")
+    return 0
+
+
+def cmd_deliver(args):
+    work = load_workspace()["work_dir"]
+    state, task = os.path.join(work, "state"), f"gh-{args.issue}"
+    run_rec = load_run(work, args.issue)
+    if run_rec["phase"] != "local-verified":
+        sys.exit(f"{task} is in phase '{run_rec['phase']}', not local-verified; nothing was pushed")
+    wt, adapter = run_rec["worktree"], run_rec["delivery_adapter"]
+    token = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True).stdout.strip()
+    env = {**os.environ, "GITHUB_TOKEN": token or os.environ.get("GITHUB_TOKEN", "")}
+    report = os.path.join(state, "reports", f"{task}-delivery.json")
+    os.makedirs(os.path.dirname(report), exist_ok=True)
+    t12 = os.path.join(work, "factory", "bin", "t12")
+    steps = (
+        ("push branch", ["git", "push", "origin", run_rec["branch"]]),
+        ("open pull request", [sys.executable, os.path.join(work, "factory", "adapters", adapter + ".py"),
+                               "create-pr", "--home", state, "--task-id", task, "--out", report]),
+        ("record delivery", [t12, "deliver", "--home", state, "--task-id", task,
+                             "--adapter", adapter, "--report", report]),
+    )
+    for name, cmd in steps:
+        r = subprocess.run(cmd, cwd=wt, env=env, capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"delivery failed at step '{name}':\n{(r.stderr or r.stdout).strip()}\n"
+                     f"retry: {shlex.join(cmd)}")
+    with open(report) as f:
+        print(f"{task} delivered: {json.load(f)['ref']}")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     p = argparse.ArgumentParser(prog="t12-wizard")
@@ -236,13 +298,19 @@ def main():
     s.add_argument("--yes", action="store_true")
     sub.add_parser("status")
     sub.add_parser("run")
+    a = sub.add_parser("answer")
+    a.add_argument("issue", type=int)
+    a.add_argument("--answer")
+    d = sub.add_parser("deliver")
+    d.add_argument("issue", type=int)
     t = sub.add_parser("take")
     t.add_argument("issues", nargs="+", type=int)
     args = p.parse_args(argv)
     if args.command != "setup":
         if not os.path.exists(WORKSPACE):
             sys.exit("no workspace here; run setup first (`t12-wizard setup`)")
-        return {"take": cmd_take, "status": cmd_status, "run": cmd_run}[args.command](args)
+        return {"take": cmd_take, "status": cmd_status, "run": cmd_run,
+                "answer": cmd_answer, "deliver": cmd_deliver}[args.command](args)
     retry = "t12-wizard " + shlex.join(argv)
     try:
         cmd_setup(args, retry)
