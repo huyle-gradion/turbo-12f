@@ -132,7 +132,7 @@ After the runner exits, run `board` and act on each row:
 | phase `local-verified` | Step 5 |
 | next `human: <question>` | Relay the question. When the human answers: `t12 resume --home state --task-id <id> --answer "<their words>"`, then step 3 |
 | next names a role (`builder: stage`) | The runner left a step that did not move the run. Run step 3 again once. If the row is unchanged, read the last events and `t12 status --home state --task-id <id>`, and report what failed |
-| next `stopped: ...`, or a budget column at 0 | Report the reason from `t12 status`. Starting over is the human's call: `t12 prepare --home state --task queue/<id>.json --supersede` |
+| next `stopped: ...`, or a budget column at 0 | Report the reason from `t12 status`. Starting over is the human's call: `t12 prepare --home state --task queue/<id>.json --supersede`. Add `--carry` when the stopped run had questions answered or unfinished builder work (for example the builder found a defect in the test): the new run's builder gets the old patch as a starting point, and every role sees the answers. |
 
 A worker reply that is rejected (`worker output is not valid JSON`, a
 refused step) is recorded as evidence and costs one try; it is not

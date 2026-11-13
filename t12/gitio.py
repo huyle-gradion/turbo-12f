@@ -27,6 +27,14 @@ def git_ok(repo, *args, timeout=_TIMEOUT, env=None, strip=True):
     return obs["stdout"].strip() if strip else obs["stdout"]
 
 
+def work_diff(repo, base, exclude=None):
+    """Everything the worktree changed since `base`, committed or not,
+    new files included, optionally leaving one path out."""
+    git_ok(repo, "add", "-A", "-N")
+    spec = ["--", "."] + ([f":(exclude){exclude}"] if exclude else [])
+    return git_ok(repo, "diff", base, *spec, strip=False)
+
+
 def is_git_repo(path):
     if not os.path.isdir(path):
         return False

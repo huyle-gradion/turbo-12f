@@ -309,6 +309,45 @@ class CliCase(unittest.TestCase):
         self.assertIn("stop it first", result.stderr)
         self.assertEqual(self.phase(), "red")
 
+    def carried_context(self, role):
+        result = self.t12("context", "--home", self.home, "--task-id", "demo-1",
+                          "--role", role, "--phase", "ready")
+        return json.loads(result.stdout.split("--- context (JSON) ---\n", 1)[1])
+
+    def stop_with_unfinished_work_and_an_answer(self):
+        self.do_red()
+        self.t12("escalate", "--home", self.home, "--task-id", "demo-1",
+                 "--question", "the test is wrong, which fix?")
+        self.t12("resume", "--home", self.home, "--task-id", "demo-1", "--answer", "use fix A")
+        self.write_worktree("app.py", APP_V2 + "# carried marker\n")
+        self.write_worktree("tests/test_greet.py", TEST_FILE + "# old defective test\n")
+        self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "test defect")
+
+    def test_supersede_carry_gives_the_builder_the_old_patch_and_everyone_the_answers(self):
+        self.stop_with_unfinished_work_and_an_answer()
+        self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede", "--carry")
+        builder = self.carried_context("builder")
+        self.assertIn("# carried marker", builder["carried_patch"]["text"])
+        self.assertNotIn("old defective test", builder["carried_patch"]["text"])
+        self.assertFalse(builder["carried_patch"]["truncated"])
+        for role in ("test-writer", "builder", "reviewer"):
+            context = self.carried_context(role)
+            self.assertEqual(context["human_responses"],
+                             [{"question": "the test is wrong, which fix?", "answer": "use fix A"}], role)
+        for role in ("test-writer", "reviewer"):
+            self.assertNotIn("carried_patch", self.carried_context(role), role)
+
+    def test_supersede_without_carry_starts_clean(self):
+        self.stop_with_unfinished_work_and_an_answer()
+        self.t12("prepare", "--home", self.home, "--task", self.task_path, "--supersede")
+        context = self.carried_context("builder")
+        self.assertEqual(context["human_responses"], [])
+        self.assertNotIn("carried_patch", context)
+
+    def test_carry_without_supersede_is_refused(self):
+        result = self.t12("prepare", "--home", self.home, "--task", self.task_path, "--carry", expect=1)
+        self.assertIn("--carry", result.stderr)
+
     def test_stop_then_supersede_and_rerun(self):
         self.do_red()
         self.t12("stop", "--home", self.home, "--task-id", "demo-1", "--reason", "bad approach")
