@@ -259,14 +259,37 @@ def cmd_init(args):
 def cmd_prepare(args):
     home = _home(args)
     config = _config(home)
+    if args.carry and not args.supersede:
+        raise StateError("--carry only applies with --supersede")
     task = store.load_json(args.task)
     task_id = task.get("id")
     with model.run_lock(home, task_id):
         return _admit(home, config["repo"], config.get("trunk", "main"), task, task_id,
-                      args.supersede)
+                      args.supersede, args.carry)
 
 
-def _admit(home, repo, trunk, task, task_id, supersede):
+CARRIED_PATCH_CHARS = 12000
+
+
+def _carry_from(home, old, archive):
+    """What a human-approved restart keeps from the stopped run: the
+    answers it received, and the builder's unfinished work as a patch
+    (never a commit; the new run's red, gates and review run normally).
+    The old red test is left out of the patch."""
+    carried = {"from": archive, "patch": None,
+               "answers": list((old.get("carried") or {}).get("answers") or [])}
+    carried["answers"] += [{"question": e["question"], "answer": e["answer"]}
+                           for e in old.get("escalations") or [] if e["answer"] is not None]
+    if os.path.isdir(old["worktree"]):
+        patch = gitio.work_diff(old["worktree"], old["base_commit"],
+                                (old.get("red") or {}).get("test_path"))
+        if patch.strip():
+            carried["patch"] = evidence.write_evidence(
+                home, old["task_id"], f"carried-{archive}.patch", patch.encode("utf-8"))
+    return carried
+
+
+def _admit(home, repo, trunk, task, task_id, supersede, carry=False):
     if not gitio.is_clean(repo):
         raise StateError(f"product repo has uncommitted changes: {repo}")
     base = task.get("base", "main")
@@ -292,6 +315,7 @@ def _admit(home, repo, trunk, task, task_id, supersede):
                 f"gate {gate.get('name')!r} rejected at admission: {exc}"
             ) from exc
     supersedes = None
+    carried = None
     if os.path.exists(model.run_path(home, task_id)):
         if not supersede:
             raise StateError(
@@ -304,6 +328,8 @@ def _admit(home, repo, trunk, task, task_id, supersede):
                 f"cannot supersede: run is {old['phase']!r}; stop it first"
             )
         supersedes = model.archive_run(home, old)
+        if carry:
+            carried = _carry_from(home, old, supersedes)
         # The old worktree and factory branch are disposable working
         # state; the archived run record keeps every SHA and ref.
         gitio.remove_worktree_force(repo, old["worktree"])
@@ -319,6 +345,8 @@ def _admit(home, repo, trunk, task, task_id, supersede):
         run[key] = profile[key]
     run["trunk"] = trunk
     run["trunk_commit"] = trunk_commit
+    if carried:
+        run["carried"] = carried
     if gitio.branch_exists(repo, run["branch"]):
         raise StateError(f"branch already exists: {run['branch']}")
     gitio.add_worktree(repo, run["worktree"], run["branch"], base_commit)
@@ -428,13 +456,22 @@ def cmd_context(args):
         if run["red"] else None,
         "changed_files": changed,
         "last_compacted_error": _last_compacted_error(home, run),
-        "human_responses": [
+        "human_responses": (run.get("carried") or {}).get("answers", []) + [
             {"question": e["question"], "answer": e["answer"]}
             for e in run.get("escalations") or [] if e["answer"] is not None
         ],
         "tools": tools.schema_for(kind),
         "instructions": [{k: entry[k] for k in ("source", "path", "sha256")} for entry in used],
     }
+    carried_patch = (run.get("carried") or {}).get("patch")
+    if kind == "builder" and carried_patch:
+        evidence.verify_ref(home, run["task_id"], carried_patch)
+        with open(carried_patch["path"], encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        context["carried_patch"] = {
+            "from": run["carried"]["from"], "text": text[:CARRIED_PATCH_CHARS],
+            "truncated": len(text) > CARRIED_PATCH_CHARS,
+        }
     prompt, *skills = used
     print(prompt["text"])
     for skill in skills:
@@ -1351,6 +1388,9 @@ def build_parser():
     p = sub.add_parser("prepare"); p.add_argument("--home", required=True); p.add_argument("--task", required=True)
     p.add_argument("--supersede", action="store_true",
                    help="archive a stopped run for this task and start a fresh one")
+    p.add_argument("--carry", action="store_true",
+                   help="with --supersede: keep the old run's answered questions, and give the "
+                        "builder its unfinished work as a patch to start from")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("context"); p.add_argument("--home", required=True); p.add_argument("--task-id", required=True)
