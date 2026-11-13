@@ -14,6 +14,16 @@ RUNNER = os.path.join(ROOT, "adapters", "runner.py")
 FAKE = os.path.join(ROOT, "tests", "fake_model.py")
 
 
+class ContextJsonCase(unittest.TestCase):
+    def test_a_context_string_holding_the_marker_text_does_not_break_the_split(self):
+        sys.path.insert(0, os.path.join(ROOT, "adapters"))
+        import runner
+        quoted = 'print("--- context (JSON) ---")\n# and again: --- context (JSON) ---'
+        stdout = ("prompt text\n--- context (JSON) ---\n"
+                  + json.dumps({"worktree": "/w", "carried_patch": {"text": quoted}}, indent=2) + "\n")
+        self.assertEqual(runner.context_json(stdout)["worktree"], "/w")
+
+
 class RunnerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
