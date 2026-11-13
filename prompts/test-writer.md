@@ -27,6 +27,14 @@ context below. The test must:
   them errors in `setUp`. Local `git init`, `add` and `commit` work.
   Stub the code that pushes, or inject a fake runner for it.
 
+## Defects an earlier attempt found
+
+If the context has `carried_open_questions`, a builder on an earlier
+attempt reported those defects in the test and the run was restarted.
+Write your test so none of them can happen again, and read
+`human_responses` for the human's decisions. Never copy the earlier
+test's setup unchanged.
+
 ## Output (structured — Factor 4)
 
 When you are done, write a JSON result to stdout:
