@@ -5,8 +5,7 @@ labels: []
 ---
 
 ### Summary
-<!-- Intake refuses HTML comments in an issue body: delete every comment, including this one, before you save. -->
-What is wrong or missing, in two or three sentences. Name the file and function.
+What is wrong or missing, in two or three sentences. Name the file and function. Do not use HTML comments: intake refuses them.
 
 ### Decisions
 Every choice already made. Leave no "Open questions" section.
