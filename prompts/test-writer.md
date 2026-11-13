@@ -14,7 +14,11 @@ context below. The test must:
 - FAIL on the current code, with the failure marker named in the
   context;
 - use only the project's existing test framework and imports;
-- not touch any file except the test file you were assigned;
+- be written in a file listed under `touches` in the context. Put it in
+  one of the `tests/` paths listed there, and add to an existing test
+  file instead of inventing a new file name: `red` refuses a test
+  outside `touches`;
+- not touch any file except that test file;
 - never open a socket or start a local server. The test runs in a cage
   that denies all network, loopback included. A test that binds a port
   skips, a skipped test counts as passing, and the factory refuses it as
