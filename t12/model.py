@@ -262,7 +262,7 @@ def record_measurements(run):
     calibrate anything and is reported as such."""
     budgets = run["budgets"]
     run["measurements"] = {
-        "wall_used_s": round(time.time() - budgets["started_at"], 1),
+        "wall_used_s": round(wall_used_s(run), 1),
         "ops_used": budgets["ops_used"],
         "repairs_used": budgets["repairs_used"],
         "gates": len(run["gates"]),
@@ -551,14 +551,30 @@ def transition(run, to):
             f"cannot move {run['task_id']} from {run['phase']} to {to}; "
             f"allowed: {sorted(allowed) or ['none']}"
         )
+    now = time.time()
+    if to == "paused":
+        run["paused_at"] = now
+    elif run["phase"] == "paused" and run.get("paused_at") is not None:
+        budgets = run["budgets"]
+        budgets["paused_s"] = budgets.get("paused_s", 0) + (now - run["paused_at"])
+        run["paused_at"] = None
     run["phase"] = to
     return run
+
+
+def wall_used_s(run):
+    """Seconds spent against the time budget; time in `paused` is free."""
+    budgets = run["budgets"]
+    now = time.time()
+    if run["phase"] == "paused" and run.get("paused_at") is not None:
+        now = run["paused_at"]
+    return now - budgets["started_at"] - budgets.get("paused_s", 0)
 
 
 def check_budgets(run):
     """Fail closed when a budget is exhausted. Call before any step."""
     budgets = run["budgets"]
-    wall = time.time() - budgets["started_at"]
+    wall = wall_used_s(run)
     if wall > budgets["time_limit_s"]:
         raise BudgetError(
             f"time budget exhausted: {wall:.0f}s used of {budgets['time_limit_s']}s"
@@ -575,7 +591,7 @@ def check_budgets(run):
 
 
 def time_left_s(run):
-    return max(0, run["budgets"]["time_limit_s"] - (time.time() - run["budgets"]["started_at"]))
+    return max(0, run["budgets"]["time_limit_s"] - wall_used_s(run))
 
 
 def bump_op(run):
