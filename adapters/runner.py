@@ -10,6 +10,11 @@ through `t12-queue`, then takes each run's `next` from `t12 board --json`:
   prompt, one fresh model call answers it under a new session id, and
   `t12 act` takes the JSON. A rejected output goes back to the same
   session once, with the error.
+- A `local-verified` run whose profile names a `delivery` adapter is
+  pushed, opened as a change request, and recorded with `t12 deliver`.
+  Without one the runner says it is ready to deliver by hand. A failed
+  step prints the command that retries it; an `uncertain` delivery is
+  never repeated and goes to `--notify-cmd` for `--resolves`.
 - `human: ...`, `stopped: ...` and a spent budget are reported and
   skipped. The runner never answers an escalation and never merges.
 
@@ -44,6 +49,10 @@ import uuid
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
 CONTEXT_MARKER = "--- context (JSON) ---"
 DETERMINISTIC = ("replay", "green")
+ADAPTER_DIR = os.path.dirname(os.path.abspath(__file__))
+FORGES = {"github": ("create-pr", "GITHUB_TOKEN"),
+          "gitlab": ("create-mr", "GITLAB_TOKEN"),
+          "bitbucket": ("create-pr", "BITBUCKET_TOKEN")}
 
 
 def t12(*args, timeout=None):
@@ -273,11 +282,61 @@ def notify(notify_cmd, message):
             print(f"warning: notify failed: {exc}", file=sys.stderr)
 
 
+def read_run(home, task_id):
+    with open(os.path.join(home, "runs", f"{task_id}.json"), encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def deliver(home, task_id, notify_cmd, scratch):
+    """Push a local-verified run and open its change request. Never
+    merges, approves or closes. It reports and returns nothing."""
+    run = read_run(home, task_id)
+    adapter = run.get("delivery_adapter")
+    if run["phase"] != "local-verified" or not adapter:
+        return
+    last = (run.get("deliveries") or [None])[-1]
+    if last and last["outcome"] == "confirmed":
+        return
+    if last and last["outcome"] == "uncertain":
+        notify(notify_cmd, f"{task_id}: delivery via {adapter} is uncertain "
+                           f"({last.get('detail', '')}); read it back and record it with "
+                           f"`t12 deliver --resolves`. The runner will not repeat it")
+        return
+    verb, token_var = FORGES[adapter]
+    if not os.environ.get(token_var):
+        print(f"{task_id}: not delivered: set {token_var} in the runner's environment")
+        return
+    report = os.path.join(scratch, f"{task_id}-delivery.json")
+    steps = (
+        ("push", ["git", "push", "origin", run["branch"]]),
+        (adapter, [sys.executable, os.path.join(ADAPTER_DIR, f"{adapter}.py"), verb,
+                   "--home", home, "--task-id", task_id, "--out", report]),
+        ("t12 deliver", [os.path.join(BIN, "t12"), "deliver", "--home", home,
+                         "--task-id", task_id, "--adapter", adapter, "--report", report]),
+    )
+    for name, cmd in steps:
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=run["worktree"])
+        if result.returncode != 0:
+            print(f"{task_id}: delivery stopped at {name}: "
+                  f"{(result.stderr or result.stdout).strip()}\n"
+                  f"{task_id}: retry with: cd {shlex.quote(run['worktree'])} && {shlex.join(cmd)}")
+            return
+    entry = read_run(home, task_id)["deliveries"][-1]
+    if entry["outcome"] == "confirmed":
+        print(f"{task_id}: delivered via {adapter}: {entry['ref']}")
+    elif entry["outcome"] == "uncertain":
+        deliver(home, task_id, notify_cmd, scratch)
+    else:
+        print(f"{task_id}: {adapter} did not confirm the delivery ({entry['outcome']}: "
+              f"{entry.get('detail', '')}); retry with: {shlex.join(steps[0][1])} "
+              f"&& {shlex.join(steps[1][1])}")
+
+
 def drive(home, queue, max_active, model_cmd, notify_cmd):
     """Pass after pass until no step moves a run. A run whose step left it
     where it was is not stepped again in this invocation, so a worker that
     cannot get past a refusal costs one call per invocation, not a loop."""
-    stuck = {}
+    stuck, handled = {}, set()
     with tempfile.TemporaryDirectory(prefix="t12-runner-") as scratch:
         moved = True
         while moved:
@@ -290,6 +349,9 @@ def drive(home, queue, max_active, model_cmd, notify_cmd):
                     print(f"queue: {line}")
                     moved = moved or line.startswith("started ")
             for row in board(home):
+                if row["phase"] == "local-verified" and row["task_id"] not in handled:
+                    handled.add(row["task_id"])
+                    deliver(home, row["task_id"], notify_cmd, scratch)
                 if row["busy"] or waiting_reason(row) or row["task_id"] in stuck:
                     continue
                 line = step(home, row, model_cmd, scratch)
@@ -300,6 +362,10 @@ def drive(home, queue, max_active, model_cmd, notify_cmd):
                 else:
                     moved = True
     for row in board(home):
+        if row["phase"] == "local-verified" and not read_run(
+                home, row["task_id"]).get("delivery_adapter"):
+            print(f"{row['task_id']}: local-verified and ready to deliver by hand "
+                  "(the profile sets no delivery adapter)")
         reason = waiting_reason(row) or stuck.get(row["task_id"])
         if reason:
             notify(notify_cmd, f"waiting {row['task_id']}: {reason}")

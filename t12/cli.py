@@ -345,6 +345,8 @@ def _admit(home, repo, trunk, task, task_id, supersede, carry=False):
                         sandbox_adapter=adapter, sandbox_image=image)
     for key in profile_mod.SCOPE_KEYS:
         run[key] = profile[key]
+    if profile.get("delivery"):
+        run["delivery_adapter"] = profile["delivery"]["adapter"]
     run["trunk"] = trunk
     run["trunk_commit"] = trunk_commit
     if carried:
