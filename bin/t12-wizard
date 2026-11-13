@@ -287,6 +287,35 @@ def cmd_deliver(args):
     return 0
 
 
+def cmd_sync(args):
+    ws = load_workspace()
+    work, product = ws["work_dir"], os.path.join(ws["work_dir"], "product")
+
+    def git(*a, cwd=product):
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True)
+
+    r = git("pull", "--ff-only", cwd=os.path.join(work, "factory"))
+    if r.returncode != 0:
+        sys.exit("could not pull the factory clone: " + (r.stderr or r.stdout).strip())
+    for a in (("checkout", "main"), ("pull", "--ff-only")):
+        r = git(*a)
+        if r.returncode != 0:
+            sys.exit("could not pull the product's main branch: " + (r.stderr or r.stdout).strip())
+    if ws["rules_branch"] == "local":
+        r = git("checkout", TRUNK)
+        if r.returncode == 0:
+            r = git("rebase", "main")
+        if r.returncode != 0:
+            git("rebase", "--abort")
+            git("checkout", "main")
+            sys.exit("the product changed under the profile: rebasing " + TRUNK + " onto main conflicted.\n"
+                     + (r.stderr or r.stdout).strip() + "\nThe rebase was aborted and the product clone is on main. "
+                     "Resolve it by hand: in the product clone run `git checkout " + TRUNK
+                     + "`, `git rebase main`, fix the conflicts, then rerun `t12-wizard sync`.")
+    print("synced")
+    return 0
+
+
 def main():
     argv = sys.argv[1:]
     p = argparse.ArgumentParser(prog="t12-wizard")
@@ -298,6 +327,7 @@ def main():
     s.add_argument("--yes", action="store_true")
     sub.add_parser("status")
     sub.add_parser("run")
+    sub.add_parser("sync")
     a = sub.add_parser("answer")
     a.add_argument("issue", type=int)
     a.add_argument("--answer")
@@ -310,7 +340,7 @@ def main():
         if not os.path.exists(WORKSPACE):
             sys.exit("no workspace here; run setup first (`t12-wizard setup`)")
         return {"take": cmd_take, "status": cmd_status, "run": cmd_run,
-                "answer": cmd_answer, "deliver": cmd_deliver}[args.command](args)
+                "answer": cmd_answer, "deliver": cmd_deliver, "sync": cmd_sync}[args.command](args)
     retry = "t12-wizard " + shlex.join(argv)
     try:
         cmd_setup(args, retry)
