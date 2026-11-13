@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""t12-wizard: guided setup for a turbo-12f workspace. Standard library, git and gh only."""
+
+import argparse
+import json
+import os
+import shlex
+import subprocess
+import sys
+
+WORKSPACE = "t12-workspace.json"
+TRUNK = "t12-trunk"
+LABEL = "factory"
+DEFAULT_FACTORY = "https://github.com/huyle-gradion/turbo-12f"
+FIELDS = (  # (key, flag, prompt)
+    ("product_repo", "--product-repo", "Product repo URL"),
+    ("work_dir", "--work-dir", "Work folder"),
+    ("commit_name", "--commit-name", "Commit name"),
+    ("commit_email", "--commit-email", "Commit email"),
+    ("rules_branch", "--rules-branch", "Rules on the product's main branch or a local-only branch (main/local)"),
+)
+
+
+class StepFailed(Exception):
+    pass
+
+
+def run(step, cmd, cwd=None, retry=None):
+    try:
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    except OSError as e:
+        raise StepFailed(f"{step}: {e}\nretry: {retry}")
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout).strip()
+        raise StepFailed(f"setup failed at step '{step}': {shlex.join(cmd)}\n{err}\nretry: {retry}")
+    return r
+
+
+def slug(repo):
+    parts = repo.rstrip("/").removesuffix(".git").replace(":", "/").split("/")
+    return "/".join(parts[-2:])
+
+
+def confirm(question):
+    try:
+        return input(question + " [y/N] ").strip().lower() in ("y", "yes")
+    except EOFError:
+        return False
+
+
+def cmd_setup(args, retry):
+    values = {}
+    for key, flag, prompt in FIELDS:
+        v = getattr(args, key)
+        if v is None:
+            try:
+                v = input(prompt + ": ").strip()
+            except EOFError:
+                sys.exit(f"missing {flag}; give it as a flag or run in a terminal")
+        values[key] = v
+    if values["rules_branch"] not in ("main", "local"):
+        sys.exit("--rules-branch must be main or local")
+    work = os.path.abspath(values["work_dir"])
+    values["work_dir"] = work
+    ws_path = os.path.join(work, WORKSPACE)
+
+    if os.path.exists(ws_path):
+        with open(ws_path) as f:
+            existing = json.load(f)
+        if existing == values:
+            print("workspace already set up; nothing to change")
+            return
+        if not args.yes and not confirm(f"{ws_path} differs from these answers. Overwrite?"):
+            print("left the workspace unchanged")
+            return
+
+    if subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:
+        sys.exit("no forge login found; run `gh auth login` and retry:\n" + retry)
+
+    factory, product = os.path.join(work, "factory"), os.path.join(work, "product")
+    os.makedirs(work, exist_ok=True)
+    for name, url, dest in (("clone factory", args.factory_repo, factory),
+                            ("clone product", values["product_repo"], product)):
+        if not os.path.isdir(dest):
+            run(name, ["git", "clone", url, dest], retry=retry)
+    for dest in (factory, product):
+        run("set commit identity", ["git", "config", "user.name", values["commit_name"]], cwd=dest, retry=retry)
+        run("set commit identity", ["git", "config", "user.email", values["commit_email"]], cwd=dest, retry=retry)
+    if values["rules_branch"] == "local":
+        exists = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "refs/heads/" + TRUNK],
+                                cwd=product, capture_output=True).returncode == 0
+        run("create trunk branch", ["git", "checkout"] + ([] if exists else ["-b"]) + [TRUNK],
+            cwd=product, retry=retry)
+        profile = os.path.join(product, ".t12", "project.json")
+        os.makedirs(os.path.dirname(profile), exist_ok=True)
+        with open(profile, "w") as f:
+            json.dump({"name": os.path.basename(product), "gates": [],
+                       "intake": {"adapter": "github-issues", "repo": slug(values["product_repo"]),
+                                  "label": LABEL}}, f, indent=2)
+            f.write("\n")
+        run("commit starter profile", ["git", "add", ".t12/project.json"], cwd=product, retry=retry)
+        staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=product).returncode != 0
+        if staged:
+            run("commit starter profile", ["git", "commit", "-m", "chore: starter t12 profile"],
+                cwd=product, retry=retry)
+    trunk = TRUNK if values["rules_branch"] == "local" else "main"
+    run("t12 init", [os.path.join(factory, "bin", "t12"), "init", "--repo", product,
+                     "--home", os.path.join(work, "state"), "--trunk", trunk], retry=retry)
+    run("create intake label", ["gh", "label", "create", LABEL, "--repo", slug(values["product_repo"]),
+                                "--force"], retry=retry)
+    with open(ws_path, "w") as f:
+        json.dump(values, f, indent=2)
+        f.write("\n")
+    print(f"workspace ready: {ws_path}")
+
+
+def main():
+    argv = sys.argv[1:]
+    p = argparse.ArgumentParser(prog="t12-wizard")
+    sub = p.add_subparsers(dest="command", required=True)
+    s = sub.add_parser("setup")
+    for key, flag, _ in FIELDS:
+        s.add_argument(flag, dest=key)
+    s.add_argument("--factory-repo", default=DEFAULT_FACTORY)
+    s.add_argument("--yes", action="store_true")
+    sub.add_parser("status")
+    args = p.parse_args(argv)
+    if args.command != "setup":
+        if not os.path.exists(WORKSPACE):
+            sys.exit("no workspace here; run setup first (`t12-wizard setup`)")
+        return
+    retry = "t12-wizard " + shlex.join(argv)
+    try:
+        cmd_setup(args, retry)
+    except StepFailed as e:
+        sys.exit(str(e))
+
+
+if __name__ == "__main__":
+    main()
