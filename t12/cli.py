@@ -1312,6 +1312,15 @@ def cmd_escalate(args):
     run = _run(home, args.task_id)
     if run["phase"] in ("local-verified", "stopped", "paused"):
         raise StateError(f"cannot escalate from phase {run['phase']!r}")
+    if run["phase"] in ("red", "gates", "green"):
+        wt = _check_worktree(run)
+        expected = (run["red"] if run["phase"] == "red" else run["candidate"])["commit"]
+        if gitio.head(wt) != expected:
+            raise StateError(
+                "refusing escalate: HEAD moved since the last recorded stage "
+                f"(expected {expected[:12]}, found {gitio.head(wt)[:12]}); "
+                "stage the new commit first, then escalate"
+            )
     run["prior_phase"] = run["phase"]
     run.setdefault("escalations", []).append({
         "question": args.question, "asked_at": time.time(),
