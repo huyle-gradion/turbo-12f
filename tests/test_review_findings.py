@@ -100,6 +100,62 @@ class ChangesRequestedLoop(unittest.TestCase):
         self.assertEqual(after["budgets"]["ops_used"], before + 1)
         self.assertEqual(after["candidate"], self.commit)
 
+    def run_record(self):
+        path = os.path.join(self.home, "runs", "demo-1.json")
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def events(self):
+        path = os.path.join(self.home, "runs", "demo-1.events.jsonl")
+        with open(path, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def stage(self, expect):
+        return self.t12("stage", "--home", self.home, "--task-id", "demo-1",
+                        "--session", "sess-builder", expect=expect)
+
+    def test_refused_restage_pauses_with_the_report_in_the_question(self):
+        report = (f"Verdict: changes-requested\n\n## Findings\n\n- {FINDING}\n")
+        self.stage(expect=1)
+        record = self.run_record()
+        self.assertEqual(record["phase"], "paused")
+        open_questions = [e for e in record["escalations"] if e["answer"] is None]
+        self.assertEqual(len(open_questions), 1)
+        self.assertIn(report, open_questions[0]["question"])
+        self.assertIn("stage-refused", [e.get("type") or e.get("event")
+                                        for e in self.events()])
+
+    def test_uncommitted_refusal_leaves_phase_and_escalations_alone(self):
+        wt = os.path.join(self.home, "worktrees", "demo-1")
+        self.write(wt, "scratch.txt", "dirty\n")
+        phase = self.status()["phase"]
+        self.stage(expect=1)
+        record = self.run_record()
+        self.assertEqual(record["phase"], phase)
+        self.assertEqual(record["escalations"], [])
+        os.remove(os.path.join(wt, "scratch.txt"))
+        # The different refusal must not be mistaken for the escalating one:
+        # once clean, the reviewed-commit refusal still escalates.
+        self.stage(expect=1)
+        self.assertEqual(self.run_record()["phase"], "paused")
+
+    def test_answered_escalation_then_new_commit_stages_for_one_op(self):
+        self.stage(expect=1)
+        after = self.status()["budgets"]
+        self.t12("resume", "--home", self.home, "--task-id", "demo-1",
+                 "--answer", "fix the newline contract")
+        wt = os.path.join(self.home, "worktrees", "demo-1")
+        self.write(wt, "app.py", APP_V2 + "\n# address review\n")
+        self.git(wt, "add", ".")
+        self.git(wt, "commit", "-m", "fix: address review")
+        new_commit = self.git(wt, "rev-parse", "HEAD")
+        self.stage(expect=0)
+        status = self.status()
+        self.assertEqual(status["candidate"], new_commit)
+        self.assertEqual(status["phase"], "gates")
+        self.assertEqual(status["budgets"]["ops_used"], after["ops_used"] + 1)
+        self.assertEqual(status["budgets"]["repairs_used"], after["repairs_used"])
+
 
 if __name__ == "__main__":
     unittest.main()
