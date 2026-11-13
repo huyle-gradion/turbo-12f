@@ -306,7 +306,8 @@ def deliver(home, task_id, notify_cmd, scratch):
     if not os.environ.get(token_var):
         print(f"{task_id}: not delivered: set {token_var} in the runner's environment")
         return
-    report = os.path.join(scratch, f"{task_id}-delivery.json")
+    os.makedirs(os.path.join(home, "deliveries"), exist_ok=True)
+    report = os.path.join(home, "deliveries", f"{task_id}.json")
     steps = (
         ("push", ["git", "push", "origin", run["branch"]]),
         (adapter, [sys.executable, os.path.join(ADAPTER_DIR, f"{adapter}.py"), verb,
