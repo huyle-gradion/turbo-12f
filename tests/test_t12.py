@@ -243,6 +243,42 @@ class CliCase(unittest.TestCase):
         self.assertIn("socket", result.stderr)
         self.assertEqual(self.phase(), "ready")
 
+    def red_with(self, source, name, expect):
+        self.write_worktree(f"tests/{name}.py", source)
+        return self.t12(
+            "red", "--home", self.home, "--task-id", "demo-1",
+            "--test-path", f"tests/{name}.py",
+            "--command", f"python3 -m unittest tests.{name} -v",
+            "--marker", "ERROR", "--session", "sess-test-writer",
+            "--covers", json.dumps({"0": ["test_x"], "1": ["test_x"]}),
+            expect=expect,
+        )
+
+    def test_a_setup_error_is_not_a_valid_red(self):
+        source = (
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def setUp(self):\n"
+            "        raise RuntimeError('fixture broke')\n"
+            "    def test_x(self):\n"
+            "        self.assertTrue(True)\n"
+        )
+        result = self.red_with(source, "test_setup_err", expect=1)
+        self.assertIn("setup", result.stderr.lower())
+        self.assertIn("test_x", result.stderr)
+        self.assertEqual(self.phase(), "ready")
+
+    def test_a_missing_code_error_in_the_test_body_is_a_valid_red(self):
+        source = (
+            "import unittest\n"
+            "import app\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_x(self):\n"
+            "        app.does_not_exist_yet()\n"
+        )
+        self.red_with(source, "test_missing_code", expect=0)
+        self.assertEqual(self.phase(), "red")
+
     def test_pause_resume_and_resume_drift(self):
         self.do_red()
         self.t12("pause", "--home", self.home, "--task-id", "demo-1", "--reason", "lunch")
