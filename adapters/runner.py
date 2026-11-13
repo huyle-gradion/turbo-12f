@@ -114,7 +114,7 @@ def call_model(model_cmd, prompt, env, cwd, timeout):
 def schema_cli(model_cmd):
     """The model CLI whose schema flags the runner knows, or None."""
     name = os.path.basename(model_cmd[0])
-    if name == "claude" or (name == "codex" and model_cmd[1:2] == ["exec"]):
+    if name in ("claude", "agy") or (name == "codex" and model_cmd[1:2] == ["exec"]):
         return name
     return None
 
@@ -128,6 +128,8 @@ def with_schema(model_cmd, cli, schema_path, result_path):
     if cli == "claude":
         return [model_cmd[0], "--output-format", "json", "--json-schema", schema,
                 *model_cmd[1:]]
+    if cli == "agy":
+        return [model_cmd[0], "--json-schema", schema, *model_cmd[1:]]
     return [*model_cmd[:2], "--output-schema", schema_path, "-o", result_path,
             *model_cmd[2:]]
 
