@@ -267,6 +267,7 @@ print(json.dumps({{"tool": "escalate", "args": {{"question": "Which greeting?"}}
         script = os.path.join(self.tmp.name, "flaky.py")
         count = os.path.join(self.tmp.name, "count")
         self.prompts = os.path.join(self.tmp.name, "prompts.jsonl")
+        self.sessions = os.path.join(self.tmp.name, "sessions")
         with open(script, "w") as fh:
             fh.write(f"""import json, os, subprocess, sys
 prompt = sys.stdin.read()
@@ -274,6 +275,8 @@ role = os.environ["T12_ROLE"]
 if role == {role!r}:
     with open({self.prompts!r}, "a") as fh:
         fh.write(json.dumps(prompt) + "\\n")
+    with open({self.sessions!r}, "a") as fh:
+        fh.write(os.environ.get("T12_SESSION", "") + "\\n")
     n = int(open({count!r}).read()) if os.path.exists({count!r}) else 0
     open({count!r}, "w").write(str(n + 1))
     if n < {bad_calls}:
@@ -297,10 +300,8 @@ os.execv(sys.executable, [sys.executable, {FAKE!r}])
         self.commit_profile(step_retries=2)
         self.drive(model_cmd=self.flaky_model("builder", 2))
         self.assertEqual(self.run_record()["phase"], "local-verified")
-        builder = [c for c in self.calls() if c["role"] == "builder"]
-        self.assertEqual(len(builder), 3)
-        self.assertEqual(len({c["session"] for c in builder}), 1)
         self.assertEqual(len(self.prompts_sent()), 3)
+        self.assertEqual(len(set(self.lines(self.sessions))), 1)
 
     def test_a_retry_prompt_holds_the_hint_for_a_known_rejection_and_none_otherwise(self):
         trailer = "Reply with only the corrected JSON tool call."

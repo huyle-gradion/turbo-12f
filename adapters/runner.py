@@ -9,7 +9,8 @@ through `t12-queue`, then takes each run's `next` from `t12 board --json`:
 - Any other `<role>: ...` is a worker step. `t12 context` builds the
   prompt, one fresh model call answers it under a new session id, and
   `t12 act` takes the JSON. A rejected output goes back to the same
-  session once, with the error.
+  session with the error (and a hint for known errors), up to the
+  profile's `step_retries` times (default 1), then the run is escalated.
 - A `local-verified` run whose profile names a `delivery` adapter is
   pushed, opened as a change request, and recorded with `t12 deliver`.
   Without one the runner says it is ready to deliver by hand. A failed
@@ -209,6 +210,15 @@ def context_json(stdout):
     return json.loads(stdout.rsplit(CONTEXT_MARKER + "\n", 1)[1])
 
 
+HINTS = (("covers is missing criterion indices",
+          "\nHint: `covers` must map every acceptance criterion index (as a string) "
+          "to the test names that cover it."),)
+
+
+def hint_for(error):
+    return next((hint for sig, hint in HINTS if sig in error), "")
+
+
 def worker_step(home, row, role, model_cmd, scratch):
     task_id = row["task_id"]
     ctx = t12("context", "--home", home, "--task-id", task_id,
@@ -217,7 +227,8 @@ def worker_step(home, row, role, model_cmd, scratch):
         return f"context failed: {ctx.stderr.strip()}"
     worktree = context_json(ctx.stdout)["worktree"]
     with open(os.path.join(home, "runs", f"{task_id}.json"), encoding="utf-8") as fh:
-        run_id = json.load(fh).get("run_id")
+        run = json.load(fh)
+    run_id, retries = run.get("run_id"), run.get("step_retries", 1)
     session = f"{role}-{uuid.uuid4().hex[:16]}"
     env = dict(os.environ, T12_TASK_ID=task_id, T12_ROLE=role, T12_SESSION=session,
                T12_WORKTREE=worktree)
@@ -230,7 +241,7 @@ def worker_step(home, row, role, model_cmd, scratch):
         with open(schema_path, "w", encoding="utf-8") as fh:
             fh.write(schema.stdout)
     prompt = ctx.stdout
-    for attempt in (1, 2):
+    for attempt in range(1, retries + 2):
         base = os.path.join(scratch, f"{task_id}-{session}-{attempt}")
         result_path = base + ".result.json"
         argv = with_schema(model_cmd, cli, schema_path, result_path) if cli else model_cmd
@@ -258,11 +269,16 @@ def worker_step(home, row, role, model_cmd, scratch):
         if act.returncode == 0:
             return act.stdout.strip()
         error = act.stderr.strip()
-        if (attempt == 2 or last_event_type(home, task_id) != "worker-output-rejected"
-                or ops_left(home, task_id) < 1):
+        if (last_event_type(home, task_id) != "worker-output-rejected"
+                and not hint_for(error)):
             return f"{role} step failed: {error}"
+        if attempt == retries + 1 or ops_left(home, task_id) < 1:
+            asked = t12("escalate", "--home", home, "--task-id", task_id, "--question",
+                        f"{role} output rejected {attempt} time(s); last rejection: {error}")
+            return f"{role} step failed: {error}" + (
+                "" if asked.returncode == 0 else f" (escalate failed: {asked.stderr.strip()})")
         prompt = (ctx.stdout + "\n--- your previous output was rejected ---\n" + error
-                  + "\nReply with only the corrected JSON tool call.\n")
+                  + hint_for(error) + "\nReply with only the corrected JSON tool call.\n")
 
 
 def step(home, row, model_cmd, scratch):
