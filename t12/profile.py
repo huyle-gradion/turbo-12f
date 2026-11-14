@@ -97,8 +97,8 @@ TASK_KEYS = {
     "repair_cap": (int, _task_wins),
 }
 SCOPE_KEYS = ("protected_paths", "security_review_paths")
-PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake", "delivery")
-OTHER_KEYS = ("version", "name", "roles", "intake", "delivery")
+PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake", "delivery", "step_retries")
+OTHER_KEYS = ("version", "name", "roles", "intake", "delivery", "step_retries")
 DELIVERY_ADAPTERS = ("github", "gitlab", "bitbucket")
 
 
@@ -209,6 +209,10 @@ def parse(text):
     if text is not None:
         data.setdefault("verify_deps", [])
     data["roles"] = _roles(data.get("roles", {}))
+    if "step_retries" in data:
+        _check_type(PATH, "step_retries", data["step_retries"], int)
+        if data["step_retries"] < 0:
+            raise StateError(f"{PATH}: step_retries must be a non-negative int")
     if "intake" in data:
         data["intake"] = _intake(data["intake"])
     if "delivery" in data:

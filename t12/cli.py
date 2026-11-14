@@ -347,6 +347,8 @@ def _admit(home, repo, trunk, task, task_id, supersede, carry=False):
         run[key] = profile[key]
     if profile.get("delivery"):
         run["delivery_adapter"] = profile["delivery"]["adapter"]
+    if "step_retries" in profile:
+        run["step_retries"] = profile["step_retries"]
     run["trunk"] = trunk
     run["trunk_commit"] = trunk_commit
     if carried:
