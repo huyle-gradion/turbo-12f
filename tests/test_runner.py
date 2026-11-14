@@ -187,6 +187,71 @@ class RunnerCase(unittest.TestCase):
             self.drive(expect=1)
         self.assertEqual(self.calls(), [])
 
+    def supersede_wrapper(self, supersede):
+        """A model command that is the fake model, except that the builder's
+        call (once) optionally stops the run and prepares it again with
+        --supersede while the call is in flight, then answers `escalate`.
+        After that every call fails, so the new run is left where prepare put it."""
+        script = os.path.join(self.tmp.name, "wrapper.py")
+        flag = os.path.join(self.tmp.name, "flag")
+        snap = os.path.join(self.tmp.name, "snap")
+        with open(script, "w") as fh:
+            fh.write(f"""import json, os, shutil, subprocess, sys
+role, flag, snap, home = os.environ["T12_ROLE"], {flag!r}, {snap!r}, {self.home!r}
+if os.path.exists(flag):
+    sys.exit("model unavailable")
+if role != "builder":
+    os.execv(sys.executable, [sys.executable, {FAKE!r}])
+open(flag, "w").close()
+sys.stdin.read()
+if {supersede!r}:
+    t12 = {T12!r}
+    subprocess.run([t12, "stop", "--home", home, "--task-id", "demo-1", "--reason", "x"], check=True)
+    subprocess.run([t12, "prepare", "--home", home, "--task",
+                    {os.path.join(self.queue, "demo-1.json")!r}, "--supersede"], check=True)
+    os.makedirs(snap)
+    for name in ("demo-1.json", "demo-1.events.jsonl"):
+        shutil.copy(os.path.join(home, "runs", name), os.path.join(snap, name))
+print(json.dumps({{"tool": "escalate", "args": {{"question": "Which greeting?"}}}}))
+""")
+        return f"{sys.executable} {script}"
+
+    def test_a_superseded_runs_in_flight_output_is_refused_and_logged_on_the_old_run(self):
+        # Criterion 2: with no supersede in flight the same escalate is accepted.
+        self.drive(model_cmd=self.supersede_wrapper(False))
+        self.assertEqual(self.run_record()["phase"], "paused")
+        self.setUp()
+        out = self.drive(model_cmd=self.supersede_wrapper(True))
+        self.assertIn("superseded", out)
+        runs = os.path.join(self.home, "runs")
+        snap = os.path.join(self.tmp.name, "snap")
+        # Criterion 0: the new run is exactly as prepare left it.
+        with open(os.path.join(snap, "demo-1.json")) as fh:
+            before = json.load(fh)
+        now = self.run_record()
+        for key in ("phase", "escalations", "budgets"):
+            self.assertEqual(now[key], before[key], key)
+        self.assertEqual(now["phase"], "ready")
+        self.assertEqual(self.lines(os.path.join(runs, "demo-1.events.jsonl")),
+                         self.lines(os.path.join(snap, "demo-1.events.jsonl")))
+        # Criterion 1: the archived log ends with the rejection naming the old run.
+        [archived] = [f for f in os.listdir(runs)
+                      if f.startswith("demo-1.superseded-") and f.endswith(".events.jsonl")]
+        events = [json.loads(e) for e in self.lines(os.path.join(runs, archived))]
+        self.assertEqual(events[-1]["type"], "worker-output-rejected")
+        old_id = events[-1]["detail"]["run_id"]
+        self.assertTrue(old_id)
+        self.assertIn(old_id, out)
+        sys.path.insert(0, ROOT)
+        from t12 import model, store
+        prev = model.genesis_prev("demo-1")
+        for index, event in enumerate(events):
+            self.assertEqual(event["seq"], index + 1)
+            self.assertEqual(event["prev"], prev)
+            content = {k: v for k, v in event.items() if k != "hash"}
+            self.assertEqual(event["hash"], store.sha256_bytes(store.canonical_json(content)))
+            prev = event["hash"]
+
 
 if __name__ == "__main__":
     unittest.main()
