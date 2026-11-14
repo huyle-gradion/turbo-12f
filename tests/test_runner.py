@@ -253,5 +253,102 @@ print(json.dumps({{"tool": "escalate", "args": {{"question": "Which greeting?"}}
             prev = event["hash"]
 
 
+    def commit_profile(self, **fields):
+        os.makedirs(os.path.join(self.repo, ".t12"), exist_ok=True)
+        with open(os.path.join(self.repo, ".t12", "project.json"), "w") as fh:
+            json.dump({"version": 1, **fields}, fh)
+        for cmd in (["add", "."], ["commit", "-qm", "profile"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, check=True)
+
+    def flaky_model(self, role, bad_calls, bad="garbage"):
+        """The fake model, except that the first `bad_calls` calls for `role`
+        answer badly (`garbage`: not JSON; `no-covers`: a red_test_ready
+        covering nothing). Each prompt is kept in prompts.jsonl."""
+        script = os.path.join(self.tmp.name, "flaky.py")
+        count = os.path.join(self.tmp.name, "count")
+        self.prompts = os.path.join(self.tmp.name, "prompts.jsonl")
+        with open(script, "w") as fh:
+            fh.write(f"""import json, os, subprocess, sys
+prompt = sys.stdin.read()
+role = os.environ["T12_ROLE"]
+if role == {role!r}:
+    with open({self.prompts!r}, "a") as fh:
+        fh.write(json.dumps(prompt) + "\\n")
+    n = int(open({count!r}).read()) if os.path.exists({count!r}) else 0
+    open({count!r}, "w").write(str(n + 1))
+    if n < {bad_calls}:
+        if {bad!r} == "garbage":
+            print("Sure! Here is what I did.")
+        else:
+            out = subprocess.run([sys.executable, {FAKE!r}], input=prompt, text=True,
+                                 capture_output=True, env=os.environ).stdout
+            call = json.loads(out)
+            call["args"]["covers"] = {{}}
+            print(json.dumps(call))
+        sys.exit(0)
+os.execv(sys.executable, [sys.executable, {FAKE!r}])
+""")
+        return f"{sys.executable} {script}"
+
+    def prompts_sent(self):
+        return [json.loads(line) for line in self.lines(self.prompts)]
+
+    def test_a_step_is_retried_step_retries_times_in_one_session_then_reaches_gates(self):
+        self.commit_profile(step_retries=2)
+        self.drive(model_cmd=self.flaky_model("builder", 2))
+        self.assertEqual(self.run_record()["phase"], "local-verified")
+        builder = [c for c in self.calls() if c["role"] == "builder"]
+        self.assertEqual(len(builder), 3)
+        self.assertEqual(len({c["session"] for c in builder}), 1)
+        self.assertEqual(len(self.prompts_sent()), 3)
+
+    def test_a_retry_prompt_holds_the_hint_for_a_known_rejection_and_none_otherwise(self):
+        trailer = "Reply with only the corrected JSON tool call."
+        def after(prompt, error):
+            tail = prompt.split(error, 1)[1]
+            return tail.replace(trailer, "").strip()
+        self.commit_profile(step_retries=1)
+        self.drive(model_cmd=self.flaky_model("test-writer", 1, bad="no-covers"))
+        known = self.prompts_sent()[1]
+        self.assertIn("previous output was rejected", known)
+        self.assertNotEqual(after(known, "covers is missing criterion indices ['0']"), "")
+        self.setUp()
+        self.commit_profile(step_retries=1)
+        self.drive(model_cmd=self.flaky_model("builder", 1))
+        unknown = self.prompts_sent()[1]
+        self.assertIn("previous output was rejected", unknown)
+        self.assertEqual(after(unknown, "Expecting value: line 1 column 1 (char 0)"), "")
+
+    def test_the_last_rejection_is_escalated_verbatim_and_the_role_is_not_called_again(self):
+        self.commit_profile(step_retries=1)
+        model_cmd = self.flaky_model("builder", 99)
+        self.drive(model_cmd=model_cmd)
+        run = self.run_record()
+        self.assertEqual(run["phase"], "paused")
+        self.assertEqual(len(self.prompts_sent()), 2)
+        rejected = [json.loads(e) for e in
+                    self.lines(os.path.join(self.home, "runs", "demo-1.events.jsonl"))
+                    if '"worker-output-rejected"' in e]
+        [open_question] = [e for e in run["escalations"] if e["answer"] is None]
+        self.assertIn(rejected[-1]["detail"]["error"], open_question["question"])
+        self.drive(model_cmd=model_cmd)
+        self.assertEqual(len(self.prompts_sent()), 2)
+
+    def test_step_retries_of_zero_means_no_retry_and_an_escalation(self):
+        self.commit_profile(step_retries=0)
+        self.drive(model_cmd=self.flaky_model("builder", 99))
+        run = self.run_record()
+        self.assertEqual(run["phase"], "paused")
+        self.assertEqual(len(self.prompts_sent()), 1)
+        self.assertEqual(len([e for e in run["escalations"] if e["answer"] is None]), 1)
+
+    def test_a_profile_with_a_non_integer_step_retries_is_refused_naming_it(self):
+        self.commit_profile(step_retries="two")
+        result = subprocess.run(
+            [T12, "prepare", "--home", self.home, "--task", os.path.join(self.queue, "demo-1.json")],
+            capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("step_retries must be", result.stdout + result.stderr)
+
 if __name__ == "__main__":
     unittest.main()
