@@ -216,6 +216,8 @@ def worker_step(home, row, role, model_cmd, scratch):
     if ctx.returncode != 0:
         return f"context failed: {ctx.stderr.strip()}"
     worktree = context_json(ctx.stdout)["worktree"]
+    with open(os.path.join(home, "runs", f"{task_id}.json"), encoding="utf-8") as fh:
+        run_id = json.load(fh).get("run_id")
     session = f"{role}-{uuid.uuid4().hex[:16]}"
     env = dict(os.environ, T12_TASK_ID=task_id, T12_ROLE=role, T12_SESSION=session,
                T12_WORKTREE=worktree)
@@ -251,7 +253,8 @@ def worker_step(home, row, role, model_cmd, scratch):
         extra = [] if payload == output else ["--raw", raw_path]
         act = t12("act", "--home", home, "--task-id", task_id, "--role", role,
                   "--session", session, "--input", out_path,
-                  "--parsed-by", parsed_by, *extra)
+                  "--parsed-by", parsed_by, *extra,
+                  *(["--run-id", run_id] if run_id else []))
         if act.returncode == 0:
             return act.stdout.strip()
         error = act.stderr.strip()

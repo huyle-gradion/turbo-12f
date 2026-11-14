@@ -1368,6 +1368,8 @@ def cmd_act(args):
     output is a failed step that costs an operation, never a guess."""
     home = _home(args)
     run = _run(home, args.task_id)
+    if args.run_id and args.run_id != run.get("run_id"):
+        raise model.reject_superseded(home, args.task_id, args.run_id)
     if run["phase"] in ("local-verified", "stopped", "paused"):
         raise StateError(f"run is {run['phase']}; no worker output is accepted")
     model.check_budgets(run)
@@ -1530,6 +1532,8 @@ def build_parser():
     p.add_argument("--role", required=True, help="a role of the run")
     p.add_argument("--session", required=True, help="the host's id for the worker session that produced the output")
     p.add_argument("--input", required=True, help="the worker's JSON output (stored as evidence)")
+    p.add_argument("--run-id", help="the run the worker started on; output for any other run "
+                                    "is rejected as superseded")
     p.add_argument("--raw", help="the model's whole reply, when --input was taken out of it "
                                  "(stored as evidence)")
     p.add_argument("--parsed-by", choices=PARSED_BY, default="raw",

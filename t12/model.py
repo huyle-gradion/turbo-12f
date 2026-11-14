@@ -10,6 +10,7 @@ import json
 import os
 import re
 import time
+import uuid
 
 from . import limits as limits_mod
 from . import profile as profile_mod
@@ -379,6 +380,7 @@ def new_run(task, repo, home, base_commit, roles, supersedes=None, defaults=None
     return {
         "version": VERSION,
         "task_id": task["id"],
+        "run_id": uuid.uuid4().hex,
         "title": task.get("title", task["id"]),
         "acceptance_criteria": list(task["acceptance_criteria"]),
         "repo": repo,
@@ -451,6 +453,23 @@ def archive_run(home, run):
     return base
 
 
+def reject_superseded(home, task_id, run_id):
+    """A worker started on a run that has since been superseded. Log the
+    rejection on that run's archived event log, never on the live run,
+    and return the error to raise."""
+    error = f"run {run_id} was superseded; its output is not accepted"
+    runs = os.path.join(home, "runs")
+    for name in sorted(os.listdir(runs)):
+        if not (name.startswith(f"{task_id}.superseded-") and name.endswith(".json")):
+            continue
+        old = store.load_json(os.path.join(runs, name))
+        if old.get("run_id") == run_id:
+            append_event(home, old, "worker-output-rejected",
+                         {"run_id": run_id, "error": error},
+                         path=os.path.join(runs, name[:-len(".json")] + ".events.jsonl"))
+    return StateError(error)
+
+
 def save_run(home, run):
     store.save_json(run_path(home, run["task_id"]), run)
 
@@ -459,10 +478,10 @@ def genesis_prev(task_id):
     return store.sha256_bytes(f"t12-genesis:{task_id}".encode())
 
 
-def read_events(home, task_id):
+def read_events(home, task_id, path=None):
     """Load the event log. Raises StateError on a missing or malformed
     log — a log that cannot be read cannot be trusted."""
-    path = events_path(home, task_id)
+    path = path or events_path(home, task_id)
     if not os.path.exists(path):
         raise StateError(f"no event log for task {task_id!r}")
     events = []
@@ -481,7 +500,7 @@ def read_events(home, task_id):
     return events
 
 
-def append_event(home, run, event_type, detail=None):
+def append_event(home, run, event_type, detail=None, path=None):
     """Append one event to the hash-chained log and return it.
 
     Each event links to the previous event's hash, carries its
@@ -491,9 +510,9 @@ def append_event(home, run, event_type, detail=None):
     event breaks the state digest. The chain is the audit trail;
     the run record is the current state."""
     events = []
-    path = events_path(home, run["task_id"])
+    path = path or events_path(home, run["task_id"])
     if os.path.exists(path):
-        events = read_events(home, run["task_id"])
+        events = read_events(home, run["task_id"], path)
     prev = events[-1]["hash"] if events else genesis_prev(run["task_id"])
     event = {
         "seq": len(events) + 1,
