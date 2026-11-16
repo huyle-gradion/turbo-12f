@@ -69,6 +69,7 @@ DEFAULT_TEST_GLOBS = ["tests/**"]
 DEFAULT_ASSERTION_PATTERN = "AssertionError"
 DEFAULT_RED_STUB_MAX_LINES = 10
 DEFAULT_REFACTOR_SKIP_MAX_LINES = 5
+DEFAULT_IDLE_AFTER_S = 600
 
 
 def _append(profile_value, task_value):
@@ -134,7 +135,7 @@ TASK_KEYS = {
 SCOPE_KEYS = ("protected_paths", "security_review_paths")
 PROFILE_ONLY = SCOPE_KEYS + ("roles", "intake", "skills", "delivery", "jobs", "review_criteria")
 OTHER_KEYS = ("version", "name", "roles", "intake", "skills", "delivery", "jobs",
-              "review_criteria")
+              "review_criteria", "idle_after_s")
 DELIVERY_ADAPTERS = ("github", "gitlab", "bitbucket")
 
 
@@ -394,6 +395,11 @@ def _protected_paths_and_their_folders(protected_paths):
     return set(protected_paths) | {os.path.dirname(p) for p in protected_paths if os.path.dirname(p)}
 
 
+def _check_idle_after_s(value):
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise StateError(f"{PATH}: idle_after_s must be an integer above 0, got {value!r}")
+
+
 def parse(text):
     """The profile as stored on the trunk commit; None means no profile."""
     if text is None:
@@ -410,6 +416,8 @@ def parse(text):
         raise StateError(f"{PATH}: unknown keys {unknown}")
     if data.get("version") != VERSION:
         raise StateError(f"{PATH}: version must be {VERSION}, got {data.get('version')!r}")
+    if "idle_after_s" in data:
+        _check_idle_after_s(data["idle_after_s"])
     for key, (kind, _) in TASK_KEYS.items():
         if key in data:
             _check_type(PATH, key, data[key], kind)

@@ -7,6 +7,7 @@ the worker did in the worktree.
 
 import argparse
 import copy
+import fcntl
 import json
 import os
 import sys
@@ -566,6 +567,7 @@ def _admit(home, repo, trunk, task, task_id, supersede, carry=False):
     for key in profile_mod.SCOPE_KEYS:
         run[key] = profile[key]
     run["review_criteria"] = profile.get("review_criteria", False)
+    run["idle_after_s"] = profile.get("idle_after_s", profile_mod.DEFAULT_IDLE_AFTER_S)
     if profile.get("delivery"):
         run["delivery_adapter"] = profile["delivery"]["adapter"]
     run["trunk"] = trunk
@@ -1460,6 +1462,28 @@ def _lane_rows(home, run, done):
     return rows
 
 
+def _runner_alive(home):
+    try:
+        with open(os.path.join(home, "runner.lock")) as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _idle_s(home, task_id):
+    try:
+        events = model.read_events(home, task_id)
+    except (OSError, StateError):
+        return None
+    if not events:
+        return None
+    return int(time.time() - events[-1]["ts"])
+
+
 def cmd_board(args):
     home = _home(args)
     _config(home)
@@ -1470,6 +1494,9 @@ def cmd_board(args):
         run = model.load_run(home, name[:-len(".json")])
         b = run["budgets"]
         done = run["phase"] in ("local-verified", "stopped")
+        busy = model.is_busy(home, run["task_id"])
+        idle_s = None if run["phase"] != "gates" or busy or _runner_alive(home) else _idle_s(home, run["task_id"])
+        idle_after_s = run.get("idle_after_s", profile_mod.DEFAULT_IDLE_AFTER_S)
         rows.append({
             "task_id": run["task_id"],
             "phase": run["phase"],
@@ -1481,10 +1508,12 @@ def cmd_board(args):
             "ops_left": None if done else b["op_limit"] - b["ops_used"] - model.lane_ops_used(
                 home, run["task_id"]),
             "repairs_left": None if done else b["repair_cap"] - b["repairs_used"],
-            "busy": model.is_busy(home, run["task_id"]),
+            "busy": busy,
             "next": model.next_step(run),
             "unit": None,
+            "idle_s": idle_s if idle_s is not None and idle_s > idle_after_s else None,
             "waiting": None,
+            "idle": (idle_s or 0) > idle_after_s,
             "max_lanes": (run.get("tdd") or {}).get("max_lanes"),
         })
         if run["phase"] == "tdd":
@@ -1495,7 +1524,7 @@ def cmd_board(args):
     header = ("TASK", "PHASE", "CANDIDATE", "TIME", "OPS", "REPAIRS", "NEXT")
     table = [header] + [(
         r["task_id"] + (f"@{r['unit']}" if r["unit"] else ""),
-        r["phase"] + (" (busy)" if r["busy"] else ""),
+        r["phase"] + (" (busy)" if r["busy"] else "") + (" idle" if r.get("idle") else ""),
         (r["candidate"] or "-")[:12],
         "-" if r["time_left_s"] is None else f"{r['time_left_s']}s",
         "-" if r["ops_left"] is None else str(r["ops_left"]),
