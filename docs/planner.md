@@ -2,6 +2,13 @@
 
 Status: proposal, decisions taken. Nothing here is built.
 
+The Planner is the block before intake. People (PM, BA and tech lead,
+together "PBT") and an agent turn a client's specs into Asana sub-tasks
+the factory can deliver. It runs as interactive agent sessions with a
+person present. The core takes no part: it never calls a model, and its
+input stays an approved sub-task read by the `asana-tasks` intake
+adapter.
+
 ## Decisions
 
 - **Where it runs.** Skills in an interactive session (Claude Code or
@@ -43,13 +50,6 @@ One directory per story in the product repo, for example
 
 The profile lists `planning/` in `protected_paths`, so no factory worker
 can change the record it is building from.
-
-The Planner is the block before intake. People (PM, BA and tech lead,
-together "PBT") and an agent turn a client's specs into Asana sub-tasks
-the factory can deliver. It runs as interactive agent sessions with a
-person present. The core takes no part: it never calls a model, and its
-input stays an approved sub-task read by the `asana-tasks` intake
-adapter.
 
 ## Steps
 
