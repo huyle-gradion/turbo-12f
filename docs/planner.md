@@ -1,6 +1,48 @@
 # Planner: from client specs to Asana sub-tasks
 
-Status: proposal. Nothing here is built.
+Status: proposal, decisions taken. Nothing here is built.
+
+## Decisions
+
+- **Where it runs.** Skills in an interactive session (Claude Code or
+  omp). No new runtime and no runner: a person is always present.
+- **Where things live.** The planning record is raw files in a directory
+  of the product repo. Tasks and sub-tasks live in Asana.
+- **The score.** A rubric: four categories of 25 points that add up to
+  100. Every deducted point is backed by findings.
+- **Who approves.** Anyone on the PBT team or a developer may add the
+  approval tag to a sub-task.
+
+## The rubric
+
+| Category (25 each) | Question |
+|---|---|
+| Completeness | Is anything needed missing: users, flows, errors, data, limits? |
+| Consistency | Do parts contradict each other or the client's other documents? |
+| Testability | Could a local test check each requirement? |
+| Ambiguity | Could two engineers build it differently? |
+
+Weights sit in the versioned prompt file, so a project can change them.
+The total answers "rate it out of 100"; the categories show PBT what
+moved between rounds.
+
+## The planning record
+
+One directory per story in the product repo, for example
+`planning/<story>/`:
+
+| Path | Holds | Written by |
+|---|---|---|
+| `specs/v<N>/` | the client's files, raw, one folder per version | PBT |
+| `evaluations/round-<N>.json` | scores and findings | the evaluate skill |
+| `judgements/round-<N>.json` | PBT's verdict on each finding | PBT, through the skill |
+| `questions/round-<N>.md` | questions for the client | rendered from the judgements |
+| `decisions.md` | answers from grilling | the grill skill |
+| `story.md`, `subtasks/*.md` | the Asana task and sub-task bodies | the split skill |
+| `asana.json` | Asana ids of the task and sub-tasks | the export adapter |
+
+The profile lists `planning/` in `protected_paths`, so no factory worker
+can change the record it is building from.
 
 The Planner is the block before intake. People (PM, BA and tech lead,
 together "PBT") and an agent turn a client's specs into Asana sub-tasks
